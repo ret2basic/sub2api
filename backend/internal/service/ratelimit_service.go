@@ -550,6 +550,21 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		)
 		shouldDisable = s.handle403(ctx, account, upstreamMsg, responseBody)
 	case 429:
+		// CN 供应商 429 的性质判定依赖响应体（1113/1302 瞬时限流 vs 窗口耗尽），
+		// 此前仅 403 记录 raw_body，429 成为观测盲区（2026-09-15 GLM 池复盘）。
+		if account.IsCNProvider() {
+			logger.LegacyPrintf(
+				"service.ratelimit",
+				"[HandleUpstreamErrorRaw] account_id=%d platform=%s type=%s status=429 request_id=%s cf_ray=%s upstream_msg=%s raw_body=%s",
+				account.ID,
+				account.Platform,
+				account.Type,
+				strings.TrimSpace(headers.Get("x-request-id")),
+				strings.TrimSpace(headers.Get("cf-ray")),
+				upstreamMsg,
+				truncateForLog(responseBody, 1024),
+			)
+		}
 		s.handle429(ctx, account, headers, responseBody)
 		shouldDisable = false
 	case 529:
