@@ -95,7 +95,7 @@ func (s *GroupCapacityService) listActiveGroupIDs(ctx context.Context) ([]int64,
 func (s *GroupCapacityService) getGroupCapacitiesSequential(ctx context.Context, groupIDs []int64) []GroupCapacitySummary {
 	results := make([]GroupCapacitySummary, 0, len(groupIDs))
 	for _, groupID := range groupIDs {
-		cap, err := s.getGroupCapacity(ctx, groupID)
+		cap, err := s.GetGroupCapacityByID(ctx, groupID)
 		if err != nil {
 			// Skip groups with errors, return partial results
 			continue
@@ -234,7 +234,10 @@ func accountIDsForGroupsWithLimit(refs []groupCapacityAccountRef, groupIndex map
 	return accountIDs
 }
 
-func (s *GroupCapacityService) getGroupCapacity(ctx context.Context, groupID int64) (GroupCapacitySummary, error) {
+// GetGroupCapacityByID 返回单个分组容量聚合（可调度账号并发总和 + Redis
+// 实时占用）。2026-09-15 起除管理台外，还被池 key 容量端点
+// （/v1/sub2api/pool-capacity）复用，作为客户端动态并发上限的事实来源。
+func (s *GroupCapacityService) GetGroupCapacityByID(ctx context.Context, groupID int64) (GroupCapacitySummary, error) {
 	accounts, err := s.accountRepo.ListSchedulableByGroupID(ctx, groupID)
 	if err != nil {
 		return GroupCapacitySummary{}, err

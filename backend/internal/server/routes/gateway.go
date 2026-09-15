@@ -190,6 +190,9 @@ func RegisterGatewayRoutes(
 	gateway.Use(endpointNorm)
 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
+	// 池容量查询（2026-09-15）：客户端动态并发上限的事实来源，只走
+	// apiKeyAuth，不进模型白名单/composite 改写链。
+	gateway.GET("/sub2api/pool-capacity", h.Gateway.PoolCapacity)
 	gateway.Use(groupModelAllowlist)
 	gateway.Use(compositeTarget)
 	gateway.Use(requireGroupAnthropic)

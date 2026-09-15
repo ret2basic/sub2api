@@ -57,6 +57,7 @@ type GatewayHandler struct {
 	maxAccountSwitchesGemini  int
 	cfg                       *config.Config
 	settingService            *service.SettingService
+	groupCapacity             poolCapacityReader
 }
 
 // NewGatewayHandler creates a new GatewayHandler
