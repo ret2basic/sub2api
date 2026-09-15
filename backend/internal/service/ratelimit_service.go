@@ -1007,6 +1007,26 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 		s.handleCNProviderConcurrencyLimit403(ctx, account)
 		return true
 	}
+	// CN 供应商配额窗口耗尽（kimi "You've reached your 5-hour/weekly usage
+	// limit" 报 403）：冷却终点应是快照里的窗口重置点，而非 OpenAI 10 分钟
+	// 阶梯——阶梯到期会把已耗尽的账号放回调度，粘性会话反复砸回同一账号
+	// （2026-09-15 kimi 卡会话事故），三连击后更会错误置 status=error
+	// （池内 5 个账号被误杀的根因）。无快照重置点时回落既有阶梯。
+	if IsCNProvider(account.Platform) && cnProviderResponseIndicatesUsageWindowLimit(upstreamMsg, responseBody) {
+		if until := cnProviderQuotaSnapshotReset(account, time.Now()); until != nil {
+			s.notifyAccountSchedulingBlocked(account, *until, "403_usage_window")
+			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *until); err != nil {
+				slog.Warn("cn_usage_window_rate_limit_set_failed", "account_id", account.ID, "error", err)
+			} else {
+				slog.Info("cn_usage_window_rate_limited",
+					"account_id", account.ID,
+					"platform", account.Platform,
+					"reset_at", *until,
+				)
+				return true
+			}
+		}
+	}
 	// 国产供应商与 openai 同口径:HTML 403(CDN/代理拦截页)不构成账号失效证据,
 	// 且 403 在 failover 状态集里会被逐账号重放——直接 SetError 会让一个坏请求/
 	// 一层坏代理连环永久禁用整组账号。走 HTML 豁免 + N 次累计 + 临时冷却。

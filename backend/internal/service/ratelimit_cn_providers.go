@@ -38,6 +38,18 @@ func isCNProviderConcurrencyLimit403(account *Account, upstreamMsg string) bool 
 		strings.TrimSpace(upstreamMsg) == kimiConcurrentRequestLimitMessage
 }
 
+// cnProviderResponseIndicatesUsageWindowLimit 识别 kimi 配额窗口耗尽的文案
+//（"You've reached your 5-hour usage limit" / "weekly (7-day) usage limit"）。
+// 与并发 403（isCNProviderConcurrencyLimit403，精确匹配）相区分：usage limit
+// 属窗口耗尽，冷却终点应取快照重置点；并发限制属瞬态，短冷却即可。
+func cnProviderResponseIndicatesUsageWindowLimit(upstreamMsg string, responseBody []byte) bool {
+	if strings.Contains(strings.ToLower(upstreamMsg), "usage limit") {
+		return true
+	}
+	return len(responseBody) > 0 &&
+		strings.Contains(strings.ToLower(string(responseBody)), "usage limit")
+}
+
 // zhipuTransientRateLimitCooldown 识别智谱的瞬时限流 429：1113（并发数量超过上限）
 // 与 1302（请求频率超上限）。这两类是分钟级瞬时约束，与 5h/weekly 配额窗口无关；
 // 若套用窗口重置点会把账号停调数小时乃至数天（2026-09-15 GLM 池 3 天冷却事故）。

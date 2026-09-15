@@ -23,6 +23,21 @@ func zhipuCodingAccount(extra map[string]any) *Account {
 	}
 }
 
+func kimiCodingAccount(extra map[string]any) *Account {
+	return &Account{
+		ID:     16,
+		Name:   "kimi-test",
+		Status: "active",
+		Credentials: map[string]any{
+			"api_key":      "test-key",
+			"account_mode": AccountModeCoding,
+		},
+		Extra:    extra,
+		Platform: PlatformKimi,
+		Type:     "apikey",
+	}
+}
+
 func TestZhipuTransientRateLimitCooldown(t *testing.T) {
 	cases := []struct {
 		name string
@@ -156,5 +171,66 @@ func TestCNProviderWindowUsedAtLeast(t *testing.T) {
 				t.Fatalf("cnProviderWindowUsedAtLeast(%v) = %v, want %v", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+// 2026-09-15 kimi 卡会话事故回归：usage-limit 403 必须冷却到快照窗口重置点。
+func TestCNProviderResponseIndicatesUsageWindowLimit(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		body []byte
+		want bool
+	}{
+		{
+			name: "5-hour usage limit",
+			msg:  "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.",
+			want: true,
+		},
+		{
+			name: "weekly usage limit",
+			msg:  "You've reached your weekly (7-day) usage limit. Your quota will reset when the current 7-day window ends.",
+			want: true,
+		},
+		{
+			name: "concurrency limit is not a window limit",
+			msg:  kimiConcurrentRequestLimitMessage,
+			want: false,
+		},
+		{
+			name: "body fallback when message empty",
+			msg:  "",
+			body: []byte(`{"error":{"message":"You've reached your 5-hour usage limit"}}`),
+			want: true,
+		},
+		{
+			name: "empty everything",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cnProviderResponseIndicatesUsageWindowLimit(tc.msg, tc.body); got != tc.want {
+				t.Fatalf("cnProviderResponseIndicatesUsageWindowLimit(%q, %s) = %v, want %v", tc.msg, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// 5h 窗口耗尽（reset 在未来）必须返回 5h 重置点，而不是 weekly 或 nil——
+// 修复前 kimi 走 OpenAI 10 分钟阶梯，到期放回调度后粘性会话反复砸同一账号。
+func TestCNProviderQuotaSnapshotResetKimi5hWindow(t *testing.T) {
+	now := time.Date(2026, 9, 15, 4, 20, 0, 0, time.UTC)
+	reset5h := now.Add(8 * time.Hour)
+	weekly := now.Add(6 * 24 * time.Hour)
+	acct := kimiCodingAccount(map[string]any{
+		cnExtraKey(PlatformKimi, cnExtraSuffix5hReset):     reset5h.Format(time.RFC3339),
+		cnExtraKey(PlatformKimi, cnExtraSuffix5hUsed):      100,
+		cnExtraKey(PlatformKimi, cnExtraSuffixWeeklyReset): weekly.Format(time.RFC3339),
+		cnExtraKey(PlatformKimi, cnExtraSuffixWeeklyUsed):  31,
+	})
+	got := cnProviderQuotaSnapshotReset(acct, now)
+	if got == nil || !got.Equal(reset5h) {
+		t.Fatalf("want 5h reset %v, got %v", reset5h, got)
 	}
 }
