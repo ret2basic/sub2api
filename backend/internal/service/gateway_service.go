@@ -573,6 +573,10 @@ type AccountWaitPlan struct {
 	MaxConcurrency int
 	Timeout        time.Duration
 	MaxWaiting     int
+	// Scope 非空时表示该模型启用按模型分桶（gateway.scheduling.model_concurrency）：
+	// MaxConcurrency 是该模型的账号级上限，槽位落在 concurrency:account:{id}:m:{scope}。
+	// 空串沿用账号级单桶。
+	Scope string
 }
 
 type AccountSelectionResult struct {

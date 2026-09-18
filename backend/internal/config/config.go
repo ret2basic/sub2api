@@ -1463,6 +1463,13 @@ type GatewaySchedulingConfig struct {
 	// 兜底层账户选择策略: "last_used"(按最后使用时间排序，默认) 或 "random"(随机)
 	FallbackSelectionMode string `mapstructure:"fallback_selection_mode"`
 
+	// ModelConcurrency 按模型（wire 模型名，如 glm-5.3 / glm-5.3-flash）覆盖
+	// 每账号并发槽上限。上游对每个模型单独计并发，而账号级单桶会让高上限模型
+	// （如 glm-5.3-flash 50 并发）被低上限模型（glm-5.3 6 并发）的账号上限压死；
+	// 列出的模型改用独立分桶（concurrency:account:{id}:m:{model}），与账号级桶
+	// 互不干扰。未列出的模型沿用账号 concurrency；值 <=0 视为未配置。
+	ModelConcurrency map[string]int `mapstructure:"model_concurrency"`
+
 	// PreferSoonestReset 开启后，负载感知选择会优先选用「会话窗口最早重置」的账号
 	// （use-it-or-lose-it：先用尽即将重置的账号，保留重置时间还很久的账号）。
 	// 默认 false，保持原有「优先级 → 负载率 → LRU」行为不变。
@@ -2498,6 +2505,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)
 	viper.SetDefault("gateway.scheduling.load_batch_cache_ttl_ms", 200)
+	viper.SetDefault("gateway.scheduling.model_concurrency", map[string]int{})
 	viper.SetDefault("gateway.scheduling.snapshot_mget_chunk_size", 128)
 	viper.SetDefault("gateway.scheduling.snapshot_write_chunk_size", 256)
 	viper.SetDefault("gateway.scheduling.slot_cleanup_interval", 30*time.Second)

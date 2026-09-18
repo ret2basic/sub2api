@@ -283,6 +283,23 @@ func (h *ConcurrencyHelper) TryAcquireAccountSlot(ctx context.Context, accountID
 	return result.ReleaseFunc, true, nil
 }
 
+// TryAcquireAccountSlotScoped 与 TryAcquireAccountSlot 相同，但槽位落在按模型
+// 分桶的独立键上（scope 非空时）。上游按模型独立计并发，分桶让高上限模型
+// （glm-5.3-flash）不再被账号级单桶上限压死。
+func (h *ConcurrencyHelper) TryAcquireAccountSlotScoped(ctx context.Context, accountID int64, scope string, maxConcurrency int) (func(), bool, error) {
+	if scope == "" {
+		return h.TryAcquireAccountSlot(ctx, accountID, maxConcurrency)
+	}
+	result, err := h.concurrencyService.AcquireAccountSlotScoped(ctx, accountID, scope, maxConcurrency)
+	if err != nil {
+		return nil, false, err
+	}
+	if !result.Acquired {
+		return nil, false, nil
+	}
+	return result.ReleaseFunc, true, nil
+}
+
 // AcquireUserSlotWithWait acquires a user concurrency slot, waiting if necessary.
 // For streaming requests, sends ping events during the wait.
 // streamStarted is updated if streaming response has begun.
@@ -317,7 +334,7 @@ func (h *ConcurrencyHelper) acquireUserSlotWithWaitTimeout(c *gin.Context, userI
 	defer h.DecrementWaitCount(ctx, userID)
 
 	// Need to wait - handle streaming ping if needed
-	releaseFunc, err = h.waitForSlotWithPingTimeout(c, "user", userID, maxConcurrency, timeout, isStream, streamStarted, false)
+	releaseFunc, err = h.waitForSlotWithPingTimeout(c, "user", userID, "", maxConcurrency, timeout, isStream, streamStarted, false)
 	if err != nil {
 		return nil, err
 	}
@@ -373,17 +390,21 @@ func (h *ConcurrencyHelper) AcquireAccountSlotWithWait(c *gin.Context, accountID
 // waitForSlotWithPing waits for a concurrency slot, sending ping events for streaming requests.
 // streamStarted pointer is updated when streaming begins (for proper error handling by caller).
 func (h *ConcurrencyHelper) waitForSlotWithPing(c *gin.Context, slotType string, id int64, maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
-	return h.waitForSlotWithPingTimeout(c, slotType, id, maxConcurrency, maxConcurrencyWait, isStream, streamStarted, false)
+	return h.waitForSlotWithPingTimeout(c, slotType, id, "", maxConcurrency, maxConcurrencyWait, isStream, streamStarted, false)
 }
 
 // waitForSlotWithPingTimeout waits for a concurrency slot with a custom timeout.
-func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType string, id int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool) (func(), error) {
+// scope 非空时账号槽位走按模型分桶（见 TryAcquireAccountSlotScoped）。
+func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType string, id int64, scope string, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool, tryImmediate bool) (func(), error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
 
 	acquireSlot := func() (*service.AcquireResult, error) {
 		if slotType == "user" {
 			return h.concurrencyService.AcquireUserSlot(ctx, id, maxConcurrency)
+		}
+		if scope != "" {
+			return h.concurrencyService.AcquireAccountSlotScoped(ctx, id, scope, maxConcurrency)
 		}
 		return h.concurrencyService.AcquireAccountSlot(ctx, id, maxConcurrency)
 	}
@@ -467,7 +488,16 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 
 // AcquireAccountSlotWithWaitTimeout acquires an account slot with a custom timeout (keeps SSE ping).
 func (h *ConcurrencyHelper) AcquireAccountSlotWithWaitTimeout(c *gin.Context, accountID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
-	return h.waitForSlotWithPingTimeout(c, "account", accountID, maxConcurrency, timeout, isStream, streamStarted, true)
+	return h.waitForSlotWithPingTimeout(c, "account", accountID, "", maxConcurrency, timeout, isStream, streamStarted, true)
+}
+
+// AcquireAccountSlotWithWaitTimeoutScoped 与 AcquireAccountSlotWithWaitTimeout 相同，
+// 但账号槽位落在按模型分桶的独立键上（scope 非空时）。
+func (h *ConcurrencyHelper) AcquireAccountSlotWithWaitTimeoutScoped(c *gin.Context, accountID int64, scope string, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
+	if scope == "" {
+		return h.AcquireAccountSlotWithWaitTimeout(c, accountID, maxConcurrency, timeout, isStream, streamStarted)
+	}
+	return h.waitForSlotWithPingTimeout(c, "account", accountID, scope, maxConcurrency, timeout, isStream, streamStarted, true)
 }
 
 // nextBackoff 计算下一次退避时间

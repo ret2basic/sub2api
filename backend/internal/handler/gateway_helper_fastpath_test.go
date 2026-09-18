@@ -84,6 +84,22 @@ func (m *concurrencyCacheMock) GetAccountsLoadBatch(ctx context.Context, account
 	return map[int64]*service.AccountLoadInfo{}, nil
 }
 
+func (m *concurrencyCacheMock) AcquireAccountSlotScoped(ctx context.Context, accountID int64, scope string, maxConcurrency int, requestID string) (bool, error) {
+	if m.acquireAccountSlotFn != nil {
+		return m.acquireAccountSlotFn(ctx, accountID, maxConcurrency, requestID)
+	}
+	return false, nil
+}
+
+func (m *concurrencyCacheMock) ReleaseAccountSlotScoped(ctx context.Context, accountID int64, scope string, requestID string) error {
+	atomic.AddInt32(&m.releaseAccountCalled, 1)
+	return nil
+}
+
+func (m *concurrencyCacheMock) GetAccountsLoadBatchScoped(ctx context.Context, accounts []service.AccountWithConcurrency, scope string) (map[int64]*service.AccountLoadInfo, error) {
+	return map[int64]*service.AccountLoadInfo{}, nil
+}
+
 func (m *concurrencyCacheMock) GetUsersLoadBatch(ctx context.Context, users []service.UserWithConcurrency) (map[int64]*service.UserLoadInfo, error) {
 	return map[int64]*service.UserLoadInfo{}, nil
 }

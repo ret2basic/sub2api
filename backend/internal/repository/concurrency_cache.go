@@ -382,6 +382,16 @@ func accountSlotKey(accountID int64) string {
 	return fmt.Sprintf("%s%d", accountSlotKeyPrefix, accountID)
 }
 
+// accountSlotKeyScoped 返回账号在给定模型作用域下的槽位键；scope 为空时等价于
+// 账号级单桶键。分桶存在的意义：上游按模型独立计并发，账号级单桶会把高上限
+// 模型（glm-5.3-flash）压到低上限模型（glm-5.3）的账号并发上限。
+func accountSlotKeyScoped(accountID int64, scope string) string {
+	if scope == "" {
+		return accountSlotKey(accountID)
+	}
+	return fmt.Sprintf("%s%d:m:%s", accountSlotKeyPrefix, accountID, scope)
+}
+
 func userSlotKey(userID int64) string {
 	return fmt.Sprintf("%s%d", userSlotKeyPrefix, userID)
 }
@@ -650,6 +660,30 @@ func (c *concurrencyCache) ReleaseAccountSlot(ctx context.Context, accountID int
 	// 释放后用真实负载刷新索引；若没有槽位和等待计数，会移除索引 member。
 	c.refreshAccountActiveIndex(ctx, accountID)
 	return nil
+}
+
+// AcquireAccountSlotScoped 与 AcquireAccountSlot 相同，但槽位落在按模型分桶的
+// 独立键上（scope 非空时）。分桶键不登记活跃索引：负载读路径先清理过期成员，
+// 键本身还有 TTL 兜底，与账号级桶相比没有额外的清理依赖。
+func (c *concurrencyCache) AcquireAccountSlotScoped(ctx context.Context, accountID int64, scope string, maxConcurrency int, requestID string) (bool, error) {
+	if scope == "" {
+		return c.AcquireAccountSlot(ctx, accountID, maxConcurrency, requestID)
+	}
+	key := accountSlotKeyScoped(accountID, scope)
+	result, _, err := runScriptInt64Pair(ctx, c.rdb, acquireScript,
+		[]string{key, liveAccountSlotKey(accountID)}, maxConcurrency, c.slotTTLSeconds, requestID)
+	if err != nil {
+		return false, err
+	}
+	return result == 1, nil
+}
+
+// ReleaseAccountSlotScoped 释放分桶槽位；scope 为空时走账号级释放。
+func (c *concurrencyCache) ReleaseAccountSlotScoped(ctx context.Context, accountID int64, scope, requestID string) error {
+	if scope == "" {
+		return c.ReleaseAccountSlot(ctx, accountID, requestID)
+	}
+	return c.rdb.ZRem(ctx, accountSlotKeyScoped(accountID, scope), requestID).Err()
 }
 
 func (c *concurrencyCache) GetAccountConcurrency(ctx context.Context, accountID int64) (int, error) {
@@ -947,6 +981,17 @@ func (c *concurrencyCache) GetAccountWaitingCount(ctx context.Context, accountID
 }
 
 func (c *concurrencyCache) GetAccountsLoadBatch(ctx context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
+	return c.getAccountsLoadBatch(ctx, accounts, "")
+}
+
+// GetAccountsLoadBatchScoped 读取按模型分桶的账号负载（scope 为空时等价于账号级）。
+// 分桶模式下 CurrentConcurrency 只统计该模型作用域内的槽位，LoadRate 的分母
+// 由调用方传入的 MaxConcurrency（该模型的每账号上限）给出。
+func (c *concurrencyCache) GetAccountsLoadBatchScoped(ctx context.Context, accounts []service.AccountWithConcurrency, scope string) (map[int64]*service.AccountLoadInfo, error) {
+	return c.getAccountsLoadBatch(ctx, accounts, scope)
+}
+
+func (c *concurrencyCache) getAccountsLoadBatch(ctx context.Context, accounts []service.AccountWithConcurrency, scope string) (map[int64]*service.AccountLoadInfo, error) {
 	if len(accounts) == 0 {
 		return map[int64]*service.AccountLoadInfo{}, nil
 	}
@@ -970,7 +1015,7 @@ func (c *concurrencyCache) GetAccountsLoadBatch(ctx context.Context, accounts []
 	}
 	cmds := make([]accountCmds, 0, len(accounts))
 	for _, acc := range accounts {
-		slotKey := accountSlotKeyPrefix + strconv.FormatInt(acc.ID, 10)
+		slotKey := accountSlotKeyScoped(acc.ID, scope)
 		liveKey := liveAccountSlotKeyPrefix + strconv.FormatInt(acc.ID, 10)
 		waitKey := accountWaitKeyPrefix + strconv.FormatInt(acc.ID, 10)
 		pipe.ZRemRangeByScore(ctx, slotKey, "-inf", strconv.FormatInt(cutoffTime, 10))
