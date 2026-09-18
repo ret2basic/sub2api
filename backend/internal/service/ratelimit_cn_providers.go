@@ -33,6 +33,11 @@ const kimiConcurrentRequestLimitMessage = "You've reached your concurrent reques
 
 const cnConcurrencyLimitReasonPrefix = "cn_concurrency_limit"
 
+// cnUsageWindowNoSnapshotReason 是「窗口已耗尽但快照没有可用的重置点」时有界
+// 临时停调的稳定 reason：等下一轮周期探测写入新鲜快照后，403 路径会按真实
+// 重置点改为限流，或由快照恢复判定解除。
+const cnUsageWindowNoSnapshotReason = "403_usage_window: no quota snapshot reset yet"
+
 func isCNProviderConcurrencyLimit403(account *Account, upstreamMsg string) bool {
 	return account != nil && account.Platform == PlatformKimi &&
 		strings.TrimSpace(upstreamMsg) == kimiConcurrentRequestLimitMessage
@@ -184,10 +189,17 @@ func (s *RateLimitService) cnBalanceCooldownDuration() time.Duration {
 	return cooldown
 }
 
-// cnProviderQuotaSnapshotReset 读取 Coding Plan 账号快照中最早一个仍在未来的窗口
-// 重置时间（5h / weekly）。429 多数由 5h 滚动窗口触发，取较早的重置点可避免
-// 把账号冷却到 weekly 重置（可达数天）的过度停调；如果确是 weekly 窗口耗尽，
-// 周期额度探测刷新快照后阈值评估会再次停调到正确的时间点。
+// cnProviderQuotaSnapshotReset 读取 Coding Plan 账号快照里的冷却终点。
+//
+// 选择口径（2026-09-18 修正）：先看「已耗尽」的窗口（used_percent ≥ 100）——
+// 被烧满的窗口才是上游拒绝服务的原因，其重置点才是账号真正恢复的时间；多个
+// 耗尽窗口取最晚的一个（必须等最后一个约束解除）。此前一律取「最早重置点」，
+// 在 5h 窗口空着、weekly 烧满时会把账号只冷却到 5h 翻页，账号回到调度再吃一次
+// 403，如此循环，面板上表现为「限流中」与「正常」来回跳、标签与实际不符
+// （2026-09-18 kimi 池投诉）；同时它也让 403 反复喂给 OpenAI 阶梯。
+//
+// 没有耗尽窗口时退回原口径：取最早的重置点。429 多由 5h 滚动窗口触发，取较早
+// 点可避免把账号冷却到 weekly 重置（可达数天）的过度停调。
 //
 // 长窗口守卫（2026-09-15 GLM 池事故修正）：weekly/monthly 重置点只有在其
 // used_percent ≥ 100（快照证实窗口确实耗尽）时才可采纳。此前 5h 快照恰好过期
@@ -202,26 +214,38 @@ func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
 		return nil
 	}
 	provider := account.Platform
-	suffixes := []string{cnExtraSuffix5hReset, cnExtraSuffixWeeklyReset}
-	if account.IsOpenCodeGo() {
-		suffixes = append(suffixes, cnExtraSuffixMonthlyReset)
+	type cnSnapshotWindow struct {
+		resetSuffix string
+		usedSuffix  string
+		longWindow  bool // weekly/monthly：必须被快照证实耗尽才可采信
 	}
-	var earliest *time.Time
-	for _, suffix := range suffixes {
-		t := parseSchedulingResetAt(account.Extra[cnExtraKey(provider, suffix)])
+	windows := []cnSnapshotWindow{
+		{cnExtraSuffix5hReset, cnExtraSuffix5hUsed, false},
+		{cnExtraSuffixWeeklyReset, cnExtraSuffixWeeklyUsed, true},
+	}
+	if account.IsOpenCodeGo() {
+		windows = append(windows, cnSnapshotWindow{cnExtraSuffixMonthlyReset, cnExtraSuffixMonthlyUsed, true})
+	}
+	var earliest, latestExhausted *time.Time
+	for _, w := range windows {
+		t := parseSchedulingResetAt(account.Extra[cnExtraKey(provider, w.resetSuffix)])
 		if t == nil || !t.After(now) {
 			continue
 		}
+		exhausted := cnProviderWindowUsedAtLeast(account, provider, w.usedSuffix, 100)
 		// 长窗口必须被快照证实耗尽（used>=100）才允许作为冷却终点。
-		if suffix == cnExtraSuffixWeeklyReset && !cnProviderWindowUsedAtLeast(account, provider, cnExtraSuffixWeeklyUsed, 100) {
-			continue
-		}
-		if suffix == cnExtraSuffixMonthlyReset && !cnProviderWindowUsedAtLeast(account, provider, cnExtraSuffixMonthlyUsed, 100) {
+		if w.longWindow && !exhausted {
 			continue
 		}
 		if earliest == nil || t.Before(*earliest) {
 			earliest = t
 		}
+		if exhausted && (latestExhausted == nil || t.After(*latestExhausted)) {
+			latestExhausted = t
+		}
+	}
+	if latestExhausted != nil {
+		return latestExhausted
 	}
 	return earliest
 }

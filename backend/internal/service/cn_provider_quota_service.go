@@ -267,7 +267,66 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	} else {
 		result.Persisted = true
 	}
+	s.applyQuotaWindowScheduling(ctx, account, provider, tiers, now)
 	return result, nil
+}
+
+// applyQuotaWindowScheduling 把窗口用量反映到调度状态上：某个窗口已耗尽
+// （used_percent ≥ 100）→ 直接标成限流到该窗口的重置点；快照显示没有耗尽窗口
+// 时解除本服务此前写下的配额限流。
+//
+// 为什么要主动做：上游对耗尽的窗口是硬拒绝（下一次请求必然 403），只靠 403
+// 被动停调会让面板在两次 403 之间显示「正常」、调度器还会把流量打上去白吃一跳
+// （2026-09-18 kimi 池「周限用满却显示正常」投诉）。快照本身就是最权威的窗口
+// 状态，探测到即刻落调度状态，标签与实际一致。
+func (s *CNProviderQuotaService) applyQuotaWindowScheduling(
+	ctx context.Context,
+	account *Account,
+	provider string,
+	tiers []CNQuotaTier,
+	now time.Time,
+) {
+	if until := cnQuotaExhaustedWindowReset(tiers, now); until != nil {
+		if err := s.accountRepo.SetRateLimited(ctx, account.ID, *until); err != nil {
+			slog.Warn("cn_quota_park_failed", "account_id", account.ID, "provider", provider, "error", err)
+			return
+		}
+		slog.Info("cn_quota_window_exhausted_limited",
+			"account_id", account.ID,
+			"provider", provider,
+			"reset_at", *until,
+		)
+		return
+	}
+	// 没有耗尽窗口：若账号此前被本机制限流（快照曾报耗尽），此刻应解除。
+	// 只动限流字段，且要求限流终点在未来（已过期的限流本就不影响调度）。
+	if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
+		if err := s.accountRepo.ClearRateLimit(ctx, account.ID); err != nil {
+			slog.Warn("cn_quota_unpark_failed", "account_id", account.ID, "provider", provider, "error", err)
+			return
+		}
+		slog.Info("cn_quota_window_recovered", "account_id", account.ID, "provider", provider)
+	}
+}
+
+// cnQuotaExhaustedWindowReset 从探测到的窗口快照里取「已耗尽窗口」中最晚的重置点。
+// 取最晚：多个窗口同时耗尽时必须等最后一个约束解除，账号才真的能再用。
+// 没有耗尽窗口（或重置点缺失/已过期）返回 nil。
+func cnQuotaExhaustedWindowReset(tiers []CNQuotaTier, now time.Time) *time.Time {
+	var latest *time.Time
+	for _, t := range tiers {
+		if t.UsedPercent < 100 {
+			continue
+		}
+		reset := parseSchedulingResetAt(t.ResetAt)
+		if reset == nil || !reset.After(now) {
+			continue
+		}
+		if latest == nil || reset.After(*latest) {
+			latest = reset
+		}
+	}
+	return latest
 }
 
 func (s *CNProviderQuotaService) loadCodingPlanAccount(ctx context.Context, accountID int64) (*Account, error) {

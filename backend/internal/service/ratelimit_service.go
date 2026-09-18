@@ -1011,7 +1011,7 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 	// limit" 报 403）：冷却终点应是快照里的窗口重置点，而非 OpenAI 10 分钟
 	// 阶梯——阶梯到期会把已耗尽的账号放回调度，粘性会话反复砸回同一账号
 	// （2026-09-15 kimi 卡会话事故），三连击后更会错误置 status=error
-	// （池内 5 个账号被误杀的根因）。无快照重置点时回落既有阶梯。
+	// （池内 5 个账号被误杀的根因）。
 	if IsCNProvider(account.Platform) && cnProviderResponseIndicatesUsageWindowLimit(upstreamMsg, responseBody) {
 		if until := cnProviderQuotaSnapshotReset(account, time.Now()); until != nil {
 			s.notifyAccountSchedulingBlocked(account, *until, "403_usage_window")
@@ -1025,6 +1025,22 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 				)
 				return true
 			}
+		}
+		// 快照缺失/过期（周期探测失败、刚重启）时也不能落进阶梯：窗口耗尽的
+		// 403 不是账号失效证据，三连击会永久置 error（同上误杀根因）。改为有界
+		// 临时停调——复用余额检测的两倍周期，覆盖到下一次周期探测拿到新鲜快照，
+		// 届时再按真实重置点重判。
+		until := time.Now().Add(s.cnBalanceCooldownDuration())
+		s.notifyAccountSchedulingBlocked(account, until, "403_usage_window")
+		if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, cnUsageWindowNoSnapshotReason); err != nil {
+			slog.Warn("cn_usage_window_no_snapshot_block_failed", "account_id", account.ID, "error", err)
+		} else {
+			slog.Info("cn_usage_window_no_snapshot_blocked",
+				"account_id", account.ID,
+				"platform", account.Platform,
+				"until", until.UTC(),
+			)
+			return true
 		}
 	}
 	// 国产供应商与 openai 同口径:HTML 403(CDN/代理拦截页)不构成账号失效证据,
