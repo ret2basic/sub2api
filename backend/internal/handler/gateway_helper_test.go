@@ -108,6 +108,35 @@ func TestWrapReleaseOnDone_MultipleCallsOnlyReleaseOnce(t *testing.T) {
 	}
 }
 
+// TestOnceRelease_NotBoundToContext 验证 onceRelease 不随客户端 ctx 取消而释放。
+// 账号槽必须活到上游排空结束：客户端断连后上游调用是 detach 的
+//（WithoutCancel），网关继续排空，槽若提前释放会造成本地并发计数低于上游真实
+// 并发（2026-09-18 实测窗口 73~215s）。
+func TestOnceRelease_NotBoundToContext(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+	var releaseCount int32
+	release := onceRelease(func() {
+		atomic.AddInt32(&releaseCount, 1)
+	})
+
+	// 客户端断连（ctx 取消）不得释放账号槽
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(0), atomic.LoadInt32(&releaseCount), "客户端 ctx 取消不应释放账号槽")
+
+	// 转发/排空结束后显式释放，且幂等
+	release()
+	release()
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&releaseCount) == 1
+	}, time.Second, time.Millisecond)
+	require.Equal(t, int32(1), atomic.LoadInt32(&releaseCount))
+}
+
+func TestOnceRelease_NilSafe(t *testing.T) {
+	require.Nil(t, onceRelease(nil))
+}
+
 // TestWrapReleaseOnDone_NilReleaseFunc 验证 nil releaseFunc 不会 panic
 func TestWrapReleaseOnDone_NilReleaseFunc(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
