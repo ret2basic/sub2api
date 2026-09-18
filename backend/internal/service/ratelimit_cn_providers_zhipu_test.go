@@ -23,6 +23,23 @@ func zhipuCodingAccount(extra map[string]any) *Account {
 	}
 }
 
+// kimiCodingAccount 构造 kimi Coding Plan 账号（原随第 2 个提交引入；该提交已被
+// 上游 db8692d67 取代，辅助函数保留给 cn_quota_park_test 等用例）。
+func kimiCodingAccount(extra map[string]any) *Account {
+	return &Account{
+		ID:     16,
+		Name:   "kimi-test",
+		Status: "active",
+		Credentials: map[string]any{
+			"api_key":      "test-key",
+			"account_mode": AccountModeCoding,
+		},
+		Extra:    extra,
+		Platform: PlatformKimi,
+		Type:     "apikey",
+	}
+}
+
 func TestZhipuTransientRateLimitCooldown(t *testing.T) {
 	cases := []struct {
 		name string
@@ -131,9 +148,9 @@ func TestCNProviderQuotaSnapshotResetWeeklyGuard(t *testing.T) {
 
 func TestCNProviderWindowUsedAtLeast(t *testing.T) {
 	cases := []struct {
-		name    string
-		raw     any
-		want    bool
+		name string
+		raw  any
+		want bool
 	}{
 		{"float64 exhausted", float64(100), true},
 		{"float64 above", float64(101.5), true},
