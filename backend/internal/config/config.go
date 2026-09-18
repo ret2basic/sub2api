@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/viper"
 	"golang.org/x/net/http/httpguts"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -1468,7 +1469,11 @@ type GatewaySchedulingConfig struct {
 	// （如 glm-5.3-flash 50 并发）被低上限模型（glm-5.3 6 并发）的账号上限压死；
 	// 列出的模型改用独立分桶（concurrency:account:{id}:m:{model}），与账号级桶
 	// 互不干扰。未列出的模型沿用账号 concurrency；值 <=0 视为未配置。
-	ModelConcurrency map[string]int `mapstructure:"model_concurrency"`
+	//
+	// 故意绕过 viper 解码（mapstructure:"-"），由 applyModelConcurrencyFromRawConfig
+	// 直接读配置文件原文：viper 的 AllSettings 以 "." 为层级分隔符重建嵌套 map，
+	// 模型名里的点会被拆键，且结果随 Go map 迭代序在成败间抖动（见该函数注释）。
+	ModelConcurrency map[string]int `mapstructure:"-" yaml:"-" json:"-"`
 
 	// PreferSoonestReset 开启后，负载感知选择会优先选用「会话窗口最早重置」的账号
 	// （use-it-or-lose-it：先用尽即将重置的账号，保留重置时间还很久的账号）。
@@ -1826,6 +1831,11 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config error: %w", err)
 	}
+	// 带点模型名（glm-5.3）的按模型分桶配置不走 viper，见该函数注释。
+	if err := applyModelConcurrencyFromRawConfig(&cfg); err != nil {
+		slog.Warn("model_concurrency 原文读取失败；按模型分桶未启用",
+			"error", err, "config_file", viper.ConfigFileUsed())
+	}
 	if trustedProxiesEnvConfigured {
 		cfg.Server.TrustedProxies = normalizeStringSlice(strings.Split(trustedProxiesEnv, ","))
 	}
@@ -1979,6 +1989,39 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// applyModelConcurrencyFromRawConfig 从配置文件原文读取
+// gateway.scheduling.model_concurrency，不走 viper 解码。
+//
+// 回归背景（2026-09-18）：该键的模型名带点（glm-5.3 / glm-5.3-flash）。viper 的
+// AllSettings 以 "." 为层级分隔符把扁平键重建为嵌套 map，"glm-5.3" 被拆成
+// glm-5 → 3，与 "glm-5.3-flash" 合进同一棵子树后无法转成 map[string]int；更糟的
+// 是重建顺序取决于 Go map 的随机迭代序，同一份配置文件在「解码成功」与「解码
+// 失败」之间抖动（实测同一二进制 + 同一文件 12 次里 7 次启动失败，systemd 靠
+// 重启抽卡才把服务拉起来）。这里直接读原文件，结果确定。
+// 代价：不支持该键的环境变量覆盖（键名带点，viper 的 env 形式本来也不可用）。
+func applyModelConcurrencyFromRawConfig(cfg *Config) error {
+	path := strings.TrimSpace(viper.ConfigFileUsed())
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var raw struct {
+		Gateway struct {
+			Scheduling struct {
+				ModelConcurrency map[string]int `yaml:"model_concurrency"`
+			} `yaml:"scheduling"`
+		} `yaml:"gateway"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	cfg.Gateway.Scheduling.ModelConcurrency = raw.Gateway.Scheduling.ModelConcurrency
+	return nil
 }
 
 func configureConfigSource(setConfigFile, addConfigPath func(string)) {
@@ -2505,7 +2548,6 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)
 	viper.SetDefault("gateway.scheduling.load_batch_cache_ttl_ms", 200)
-	viper.SetDefault("gateway.scheduling.model_concurrency", map[string]int{})
 	viper.SetDefault("gateway.scheduling.snapshot_mget_chunk_size", 128)
 	viper.SetDefault("gateway.scheduling.snapshot_write_chunk_size", 256)
 	viper.SetDefault("gateway.scheduling.slot_cleanup_interval", 30*time.Second)
