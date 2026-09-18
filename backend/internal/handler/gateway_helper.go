@@ -201,6 +201,25 @@ func wrapReleaseOnDone(ctx context.Context, releaseFunc func()) func() {
 	}
 }
 
+// onceRelease 返回“至多执行一次”的释放函数，但**不绑定客户端 ctx**。
+//
+// 用于账号并发槽：流式请求的上游调用是 detach 的（context.WithoutCancel），
+// 客户端断连后网关仍会继续排空上游（2026-09-18 实测窗口 73~215 秒）。若槽位
+// 随客户端 ctx 在断连瞬间释放，本地并发计数会低于上游真实并发，新请求可以
+// 占同一个槽继续发给同一账号，上游侧并发被顶高（"槽没满却吃上游限流"）。
+// 因此这几条路径的释放必须由调用链在“上游交换结束”（转发函数返回、排空完成）
+// 之后主动触发；调用方已用 defer 把释放包在 Forward 调用的外层。
+// TTL（concurrency_slot_ttl_minutes）只作为释放遗漏时的最终兜底。
+func onceRelease(releaseFunc func()) func() {
+	if releaseFunc == nil {
+		return nil
+	}
+	var once sync.Once
+	return func() {
+		once.Do(releaseFunc)
+	}
+}
+
 // IncrementWaitCount increments the wait count for a user
 func (h *ConcurrencyHelper) IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error) {
 	return h.concurrencyService.IncrementWaitCount(ctx, userID, maxWait)
