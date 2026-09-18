@@ -1145,6 +1145,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 
 	cfg := s.schedulingConfig()
+	requestSlotScope := openAIRequestSlotScope(cfg, requestedModel)
 	preferLowUpstreamRate := useUpstreamTokenCost && s.isOpenAILowUpstreamRatePriorityEnabled(ctx)
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	var stickyAccountID int64
@@ -1158,7 +1159,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if err != nil {
 			return nil, err
 		}
-		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+		slotCap, slotScope := openAIModelSlotLimit(cfg, account, requestedModel)
+		result, err := s.tryAcquireAccountSlotScoped(ctx, account.ID, slotScope, slotCap)
 		if err == nil && result != nil && result.Acquired {
 			selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
 			return markStickySessionHit(selection, stickyHit), selectErr
@@ -1168,18 +1170,20 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if waitingCount < cfg.StickySessionMaxWaiting {
 				selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 					AccountID:      account.ID,
-					MaxConcurrency: account.Concurrency,
+					MaxConcurrency: slotCap,
 					Timeout:        cfg.StickySessionWaitTimeout,
 					MaxWaiting:     cfg.StickySessionMaxWaiting,
+					Scope:          slotScope,
 				})
 				return markStickySessionHit(selection, stickyHit), selectErr
 			}
 		}
 		selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 			AccountID:      account.ID,
-			MaxConcurrency: account.Concurrency,
+			MaxConcurrency: slotCap,
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
+			Scope:          slotScope,
 		})
 		return markStickySessionHit(selection, stickyHit), selectErr
 	}
@@ -1228,7 +1232,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					} else if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
 						_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 					} else {
-						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
+						slotCap, slotScope := openAIModelSlotLimit(cfg, account, requestedModel)
+						result, err := s.tryAcquireAccountSlotScoped(ctx, accountID, slotScope, slotCap)
 						if err == nil && result != nil && result.Acquired {
 							selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
 							if selectErr != nil {
@@ -1242,9 +1247,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 						if waitingCount < cfg.StickySessionMaxWaiting {
 							selection, selectErr := s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
 								AccountID:      accountID,
-								MaxConcurrency: account.Concurrency,
+								MaxConcurrency: slotCap,
 								Timeout:        cfg.StickySessionWaitTimeout,
 								MaxWaiting:     cfg.StickySessionMaxWaiting,
+								Scope:          slotScope,
 							})
 							return markStickySessionHit(selection, true), selectErr
 						}
@@ -1312,9 +1318,14 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 
 	accountLoads := make([]AccountWithConcurrency, 0, len(candidates))
 	for _, acc := range candidates {
+		// 分桶模型用模型级上限作为负载率分母；未分桶沿用 EffectiveLoadFactor。
+		loadCap := acc.EffectiveLoadFactor()
+		if slotCap, slotScope := openAIModelSlotLimit(cfg, acc, requestedModel); slotScope != "" {
+			loadCap = slotCap
+		}
 		accountLoads = append(accountLoads, AccountWithConcurrency{
 			ID:             acc.ID,
-			MaxConcurrency: acc.EffectiveLoadFactor(),
+			MaxConcurrency: loadCap,
 		})
 	}
 
@@ -1394,7 +1405,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 				continue
 			}
-			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
+			slotCap, slotScope := openAIModelSlotLimit(cfg, fresh, requestedModel)
+			result, err := s.tryAcquireAccountSlotScoped(ctx, fresh.ID, slotScope, slotCap)
 			if err == nil && result != nil && result.Acquired {
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
 				if selectErr != nil {
@@ -1409,7 +1421,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		return nil, true, nil
 	}
 
-	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
+	loadMap, err := s.concurrencyService.GetAccountsLoadBatchScoped(ctx, accountLoads, requestSlotScope)
 	if err != nil {
 		ordered := append([]*Account(nil), candidates...)
 		sortAccountsByPriorityAndLastUsed(ordered, false)
@@ -1433,7 +1445,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 				continue
 			}
-			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
+			slotCap, slotScope := openAIModelSlotLimit(cfg, fresh, requestedModel)
+			result, err := s.tryAcquireAccountSlotScoped(ctx, fresh.ID, slotScope, slotCap)
 			if err == nil && result != nil && result.Acquired {
 				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
 				if selectErr != nil {
@@ -1451,7 +1464,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		} else if selection != nil {
 			return selection, nil
 		} else if attempted {
-			if freshLoadMap, loadErr := s.concurrencyService.GetAccountsLoadBatchFresh(ctx, accountLoads); loadErr == nil {
+			if freshLoadMap, loadErr := s.concurrencyService.GetAccountsLoadBatchFreshScoped(ctx, accountLoads, requestSlotScope); loadErr == nil {
 				if selection, _, selectErr := tryAcquireFromLoadMap(freshLoadMap); selectErr != nil {
 					return nil, selectErr
 				} else if selection != nil {
@@ -1483,11 +1496,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			continue
 		}
+		slotCap, slotScope := openAIModelSlotLimit(cfg, fresh, requestedModel)
 		return s.newSelectionResult(ctx, fresh, false, nil, &AccountWaitPlan{
 			AccountID:      fresh.ID,
-			MaxConcurrency: fresh.Concurrency,
+			MaxConcurrency: slotCap,
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
+			Scope:          slotScope,
 		})
 	}
 
@@ -1534,6 +1549,39 @@ func (s *OpenAIGatewayService) tryAcquireAccountSlot(ctx context.Context, accoun
 		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil
 	}
 	return s.concurrencyService.AcquireAccountSlot(ctx, accountID, maxConcurrency)
+}
+
+// tryAcquireAccountSlotScoped 与 tryAcquireAccountSlot 相同，但 scope 非空时
+// 槽位落在按模型分桶的独立键上（见 gateway.scheduling.model_concurrency）。
+func (s *OpenAIGatewayService) tryAcquireAccountSlotScoped(ctx context.Context, accountID int64, scope string, maxConcurrency int) (*AcquireResult, error) {
+	if scope == "" {
+		return s.tryAcquireAccountSlot(ctx, accountID, maxConcurrency)
+	}
+	if s.concurrencyService == nil {
+		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil
+	}
+	return s.concurrencyService.AcquireAccountSlotScoped(ctx, accountID, scope, maxConcurrency)
+}
+
+// openAIRequestSlotScope 返回请求模型的槽位分桶作用域（模型未配置覆盖时为空串）。
+func openAIRequestSlotScope(cfg config.GatewaySchedulingConfig, requestedModel string) string {
+	if _, scope, ok := ModelSlotScope(cfg.ModelConcurrency, requestedModel); ok {
+		return scope
+	}
+	return ""
+}
+
+// openAIModelSlotLimit 解析账号在给定模型下的并发槽位上限与作用域：模型在
+// gateway.scheduling.model_concurrency 中列出时返回模型级上限 + 分桶 scope，
+// 否则沿用账号级上限与账号级单桶。
+func openAIModelSlotLimit(cfg config.GatewaySchedulingConfig, account *Account, requestedModel string) (int, string) {
+	if account == nil {
+		return 0, ""
+	}
+	if slotCap, scope, ok := ModelSlotScope(cfg.ModelConcurrency, requestedModel); ok {
+		return slotCap, scope
+	}
+	return account.Concurrency, ""
 }
 
 func (s *OpenAIGatewayService) resolveFreshSchedulableOpenAIAccount(ctx context.Context, account *Account, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) *Account {

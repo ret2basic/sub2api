@@ -61,6 +61,17 @@ type APIKeyConcurrencyCache interface {
 	GetAPIKeyConcurrencyBatch(ctx context.Context, apiKeyIDs []int64) (map[int64]int, error)
 }
 
+// ScopedAccountConcurrencyCache 是 ConcurrencyCache 的按模型分桶扩展：scope 非空时
+// 槽位落在 concurrency:account:{id}:m:{scope} 独立键上，不占用账号级单桶。
+// 上游对每个模型单独计并发，分桶避免高上限模型（如 glm-5.3-flash 50）被账号级
+// 单桶上限（如 glm-5.3 的 6）压死。
+// 未实现该扩展的 cache 由 ConcurrencyService 回退到账号级单桶（保持原行为）。
+type ScopedAccountConcurrencyCache interface {
+	AcquireAccountSlotScoped(ctx context.Context, accountID int64, scope string, maxConcurrency int, requestID string) (bool, error)
+	ReleaseAccountSlotScoped(ctx context.Context, accountID int64, scope string, requestID string) error
+	GetAccountsLoadBatchScoped(ctx context.Context, accounts []AccountWithConcurrency, scope string) (map[int64]*AccountLoadInfo, error)
+}
+
 // OpenAIWSIngressLeaseCache owns the short-lived distributed lease used to
 // bound live client WebSocket sessions. It is deliberately independent of the
 // request-slot namespace: idle ingress connections do not occupy turn slots.
@@ -375,6 +386,51 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 	}, nil
 }
 
+// AcquireAccountSlotScoped 与 AcquireAccountSlot 相同的等待/释放语义，但槽位
+// 落在按模型分桶的独立键上（scope 非空时）。分桶与账号级桶互不干扰。
+func (s *ConcurrencyService) AcquireAccountSlotScoped(ctx context.Context, accountID int64, scope string, maxConcurrency int) (*AcquireResult, error) {
+	if scope == "" {
+		return s.AcquireAccountSlot(ctx, accountID, maxConcurrency)
+	}
+	if maxConcurrency <= 0 {
+		return &AcquireResult{
+			Acquired:    true,
+			ReleaseFunc: func() {}, // no-op
+		}, nil
+	}
+
+	scoped, ok := s.cache.(ScopedAccountConcurrencyCache)
+	if !ok {
+		// cache 未实现分桶扩展：回退账号级单桶，保持原行为（fail-safe）。
+		return s.AcquireAccountSlot(ctx, accountID, maxConcurrency)
+	}
+
+	requestID := generateRequestID()
+
+	acquired, err := scoped.AcquireAccountSlotScoped(ctx, accountID, scope, maxConcurrency, requestID)
+	if err != nil {
+		return nil, err
+	}
+
+	if acquired {
+		return &AcquireResult{
+			Acquired: true,
+			ReleaseFunc: func() {
+				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := scoped.ReleaseAccountSlotScoped(bgCtx, accountID, scope, requestID); err != nil {
+					logger.LegacyPrintf("service.concurrency", "Warning: failed to release scoped account slot for %d/%s (req=%s): %v", accountID, scope, requestID, err)
+				}
+			},
+		}, nil
+	}
+
+	return &AcquireResult{
+		Acquired:    false,
+		ReleaseFunc: nil,
+	}, nil
+}
+
 // AcquireUserSlot attempts to acquire a concurrency slot for a user.
 // If the user is at max concurrency, it waits until a slot is available or timeout.
 // Returns a release function that MUST be called when the request completes.
@@ -576,6 +632,49 @@ func (s *ConcurrencyService) GetAccountsLoadBatch(ctx context.Context, accounts 
 // GetAccountsLoadBatchFresh 绕过极短 TTL 缓存，用于抢槽失败后的实时刷新兜底。
 func (s *ConcurrencyService) GetAccountsLoadBatchFresh(ctx context.Context, accounts []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
 	return s.getAccountsLoadBatch(ctx, accounts, false)
+}
+
+// GetAccountsLoadBatchScoped 读取按模型分桶的账号负载；scope 为空时等价于账号级。
+// 分桶负载不进短 TTL 缓存：缓存键不含 scope，且分桶流量集中在少数模型上，
+// 直接读 Redis 的代价可接受。
+func (s *ConcurrencyService) GetAccountsLoadBatchScoped(ctx context.Context, accounts []AccountWithConcurrency, scope string) (map[int64]*AccountLoadInfo, error) {
+	if scope == "" {
+		return s.getAccountsLoadBatch(ctx, accounts, true)
+	}
+	if len(accounts) == 0 || s.cache == nil {
+		return map[int64]*AccountLoadInfo{}, nil
+	}
+	return s.fetchAccountsLoadBatchScoped(ctx, accounts, scope)
+}
+
+func (s *ConcurrencyService) fetchAccountsLoadBatchScoped(ctx context.Context, accounts []AccountWithConcurrency, scope string) (map[int64]*AccountLoadInfo, error) {
+	if s.cache == nil {
+		return map[int64]*AccountLoadInfo{}, nil
+	}
+	baseCtx := context.Background()
+	if ctx != nil {
+		baseCtx = context.WithoutCancel(ctx)
+	}
+	redisCtx, cancel := context.WithTimeout(baseCtx, accountLoadBatchFetchTimeout)
+	defer cancel()
+	scoped, ok := s.cache.(ScopedAccountConcurrencyCache)
+	if !ok {
+		// cache 未实现分桶扩展：按账号级单桶读取，与旧行为一致（fail-safe）。
+		return s.cache.GetAccountsLoadBatch(redisCtx, accounts)
+	}
+	return scoped.GetAccountsLoadBatchScoped(redisCtx, accounts, scope)
+}
+
+// GetAccountsLoadBatchFreshScoped 绕过极短 TTL 缓存的按模型分桶读取，
+// 用于抢槽失败后的实时刷新兜底。
+func (s *ConcurrencyService) GetAccountsLoadBatchFreshScoped(ctx context.Context, accounts []AccountWithConcurrency, scope string) (map[int64]*AccountLoadInfo, error) {
+	if scope == "" {
+		return s.GetAccountsLoadBatchFresh(ctx, accounts)
+	}
+	if len(accounts) == 0 || s.cache == nil {
+		return map[int64]*AccountLoadInfo{}, nil
+	}
+	return s.fetchAccountsLoadBatchScoped(ctx, accounts, scope)
 }
 
 func (s *ConcurrencyService) getAccountsLoadBatch(ctx context.Context, accounts []AccountWithConcurrency, allowCache bool) (map[int64]*AccountLoadInfo, error) {

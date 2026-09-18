@@ -66,6 +66,19 @@ func (c StubConcurrencyCache) GetUsersLoadBatch(_ context.Context, users []servi
 	}
 	return result, nil
 }
+func (c StubConcurrencyCache) AcquireAccountSlotScoped(_ context.Context, _ int64, _ string, _ int, _ string) (bool, error) {
+	return true, nil
+}
+func (c StubConcurrencyCache) ReleaseAccountSlotScoped(_ context.Context, _ int64, _ string, _ string) error {
+	return nil
+}
+func (c StubConcurrencyCache) GetAccountsLoadBatchScoped(_ context.Context, accounts []service.AccountWithConcurrency, _ string) (map[int64]*service.AccountLoadInfo, error) {
+	result := make(map[int64]*service.AccountLoadInfo, len(accounts))
+	for _, acc := range accounts {
+		result[acc.ID] = &service.AccountLoadInfo{AccountID: acc.ID, LoadRate: 0}
+	}
+	return result, nil
+}
 func (c StubConcurrencyCache) GetAccountConcurrencyBatch(_ context.Context, accountIDs []int64) (map[int64]int, error) {
 	result := make(map[int64]int, len(accountIDs))
 	for _, id := range accountIDs {
