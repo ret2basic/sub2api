@@ -72,6 +72,24 @@ func zhipuTransientRateLimitCooldown(responseBody []byte) time.Duration {
 	return 0
 }
 
+// zhipuModelEntitlementError 识别智谱「模型不在订阅套餐内」错误（错误码 1311，
+// 文案「当前订阅套餐暂未开放 <model> 权限」）。模型权限与账号的 5h/weekly 配额、
+// 吞吐限流都无关：任何账号级冷却都是误判。
+// 2026-09-19 事故：model=glm-5.3-flashX（不存在的模型名）的请求被上游每条都拒
+// 1311，网关把它当窗口耗尽冷却账号，再叠加账号故障转移，一条请求把整池 10 个号
+// 全部冷却到各自 5h 窗口重置点，GLM 池整体不可用。
+func zhipuModelEntitlementError(responseBody []byte) bool {
+	if len(responseBody) == 0 {
+		return false
+	}
+	if jsonErrorCodeIs(responseBody, "1311") {
+		return true
+	}
+	// 错误码形态变化时的兜底：上游该错误的固定话术同时含「暂未开放」与「权限」。
+	msg := string(responseBody)
+	return strings.Contains(msg, "暂未开放") && strings.Contains(msg, "权限")
+}
+
 // jsonErrorCodeIs 判断 JSON 错误体里 error.code 是否等于指定字符串码。
 // 兼容 "code":"1113" / "code": "1113" / "code":1113 三种形态。
 func jsonErrorCodeIs(body []byte, code string) bool {
@@ -332,6 +350,17 @@ func (s *RateLimitService) applyCNProviderReactive429(
 			s.handleZhipuTransientRateLimit(ctx, account, cooldown, responseBody)
 			return true
 		}
+	}
+	// 0.5) 智谱模型无权限（1311「当前订阅套餐暂未开放 X 权限」）：模型不在套餐里，
+	// 与账号配额/限流无关，绝不能被下面的窗口冷却分支吞掉（2026-09-19 整池打毒事故）。
+	// 返回 true = 已处理：不做任何账号状态变更，上游错误按原样回给客户端。
+	if account.Platform == PlatformZhipu && zhipuModelEntitlementError(responseBody) {
+		slog.Warn("cn_model_not_entitled",
+			"account_id", account.ID,
+			"platform", account.Platform,
+			"upstream_msg", extractUpstreamErrorMessage(responseBody),
+		)
+		return true
 	}
 	// 1) 余额不足文案：可恢复临时停调（含智谱 payg 这类无余额端点的场景）。
 	if cnProviderResponseIndicatesInsufficientBalance(responseBody) {

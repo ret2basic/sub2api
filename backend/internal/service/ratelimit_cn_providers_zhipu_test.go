@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -233,4 +234,123 @@ func TestCNProviderQuotaSnapshotResetKimi5hWindow(t *testing.T) {
 	if got == nil || !got.Equal(reset5h) {
 		t.Fatalf("want 5h reset %v, got %v", reset5h, got)
 	}
+}
+
+// 2026-09-19 GLM 池打毒事故回归：智谱 1311「当前订阅套餐暂未开放 X 权限」是
+// 模型权限错误，不是窗口耗尽——识别后必须完全不冷却账号。事故形态是一条
+// model=glm-5.3-flashX 的请求经 10 次账号故障转移把整池 10 个号全部冷却。
+func TestZhipuModelEntitlementError(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "1311 事故原文",
+			body: `{"error":{"code":"1311","message":"当前订阅套餐暂未开放GLM-5.3-FlashX权限"}}`,
+			want: true,
+		},
+		{
+			name: "1311 数字码",
+			body: `{"error":{"code":1311,"message":"model not included in plan"}}`,
+			want: true,
+		},
+		{
+			name: "仅文案（错误码形态变化兜底）",
+			body: `{"error":{"message":"当前订阅套餐暂未开放GLM-5.3-FlashX权限"}}`,
+			want: true,
+		},
+		{
+			name: "1113 并发超上限不算",
+			body: `{"error":{"code":"1113","message":"您当前的使用量或并发量已达到上限"}}`,
+			want: false,
+		},
+		{
+			name: "1302 频率超上限不算",
+			body: `{"error":{"code":"1302","message":"请求频率超上限"}}`,
+			want: false,
+		},
+		{
+			name: "窗口耗尽不算",
+			body: `{"error":{"code":"1301","message":"您当前的使用量已达到上限"}}`,
+			want: false,
+		},
+		{
+			name: "余额不足不算",
+			body: `{"error":{"code":"1113","message":"余额不足，请充值"}}`,
+			want: false,
+		},
+		{
+			name: "无关字段里的 1311 不算",
+			body: `{"usage":{"total_tokens":13110}}`,
+			want: false,
+		},
+		{name: "空体", body: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			if tc.body != "" {
+				body = []byte(tc.body)
+			}
+			if got := zhipuModelEntitlementError(body); got != tc.want {
+				t.Fatalf("zhipuModelEntitlementError(%s) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// zhipuRateLimitStubRepo 只记录 SetRateLimited 调用，用于断言"冷却/不冷却"。
+type zhipuRateLimitStubRepo struct {
+	AccountRepository
+	rateLimitedIDs []int64
+}
+
+func (s *zhipuRateLimitStubRepo) SetRateLimited(_ context.Context, id int64, _ time.Time) error {
+	s.rateLimitedIDs = append(s.rateLimitedIDs, id)
+	return nil
+}
+
+func TestApplyCNProviderReactive429ZhipuEntitlementNoCooldown(t *testing.T) {
+	now := time.Now()
+	// 事故当时的快照形态：5h 窗口标记为耗尽且重置点在未来——旧逻辑会把它当作
+	// 冷却终点（这正是整池被打毒的方式）。
+	extra := map[string]any{
+		cnExtraKey(PlatformZhipu, cnExtraSuffix5hReset): now.Add(2 * time.Hour).Format(time.RFC3339),
+		cnExtraKey(PlatformZhipu, cnExtraSuffix5hUsed):  100,
+	}
+
+	t.Run("1311 模型无权限：不冷却账号", func(t *testing.T) {
+		repo := &zhipuRateLimitStubRepo{}
+		svc := &RateLimitService{accountRepo: repo}
+		handled := svc.applyCNProviderReactive429(
+			context.Background(),
+			zhipuCodingAccount(extra),
+			nil,
+			[]byte(`{"error":{"code":"1311","message":"当前订阅套餐暂未开放GLM-5.3-FlashX权限"}}`),
+		)
+		if !handled {
+			t.Fatal("应当识别为已处理（不让 429 继续落通用冷却逻辑）")
+		}
+		if len(repo.rateLimitedIDs) != 0 {
+			t.Fatalf("模型无权限错误不得冷却账号，实际冷却了 %v", repo.rateLimitedIDs)
+		}
+	})
+
+	t.Run("对照：窗口耗尽 429 仍照旧冷却", func(t *testing.T) {
+		repo := &zhipuRateLimitStubRepo{}
+		svc := &RateLimitService{accountRepo: repo}
+		handled := svc.applyCNProviderReactive429(
+			context.Background(),
+			zhipuCodingAccount(extra),
+			nil,
+			[]byte(`{"error":{"code":"1301","message":"您当前的使用量已达到上限"}}`),
+		)
+		if !handled {
+			t.Fatal("窗口耗尽 429 应被处理")
+		}
+		if len(repo.rateLimitedIDs) != 1 {
+			t.Fatalf("窗口耗尽 429 应冷却账号一次，实际 %v", repo.rateLimitedIDs)
+		}
+	})
 }
