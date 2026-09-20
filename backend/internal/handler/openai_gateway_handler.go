@@ -3573,6 +3573,18 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareErrorWithCode(c, status, "upstream_error", service.OpenAIImagesInsufficientBalanceCode, message, streamStarted, false)
 		return
 	}
+	// 智谱 1311：模型不在订阅套餐内。上游把它装在 HTTP 429 里，若走通用映射会
+	// 变成 "Upstream rate limit exceeded"，把订阅问题伪装成容量问题（2026-09-19
+	// flashx 事故的排查就是被这层伪装带偏的）。按真实原因透传。
+	if service.ZhipuModelEntitlementError(failoverErr.ResponseBody) {
+		message := strings.TrimSpace(service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody)))
+		if message == "" {
+			message = "upstream subscription does not include this model (zhipu 1311)"
+		}
+		service.SetOpsUpstreamError(c, http.StatusForbidden, message, "")
+		h.handleStreamingAwareError(c, http.StatusForbidden, "model_not_entitled", message, streamStarted)
+		return
+	}
 	if failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.handleStreamingAwareError(c, status, "upstream_error", message, streamStarted)

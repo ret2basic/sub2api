@@ -110,7 +110,7 @@ func TestWrapReleaseOnDone_MultipleCallsOnlyReleaseOnce(t *testing.T) {
 
 // TestOnceRelease_NotBoundToContext 验证 onceRelease 不随客户端 ctx 取消而释放。
 // 账号槽必须活到上游排空结束：客户端断连后上游调用是 detach 的
-//（WithoutCancel），网关继续排空，槽若提前释放会造成本地并发计数低于上游真实
+// （WithoutCancel），网关继续排空，槽若提前释放会造成本地并发计数低于上游真实
 // 并发（2026-09-18 实测窗口 73~215s）。
 func TestOnceRelease_NotBoundToContext(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
