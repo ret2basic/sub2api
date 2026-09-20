@@ -207,6 +207,17 @@ func (s *FailoverState) HandleFailoverError(
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
 	}
+	// 智谱 1311「当前订阅套餐暂未开放 X 权限」是订阅级的确定性错误：同套餐的
+	// 下一个账号必然给出同样答案，循环换号只会把整池账号挨个问一遍、白烧延迟
+	// （2026-09-19 flashx 事故：一条请求走完 10 个号）。立即耗尽，由
+	// handleFailoverExhausted 把真实 1311 原因以 403 model_not_entitled 透传。
+	if service.ZhipuModelEntitlementError(failoverErr.ResponseBody) {
+		logger.FromContext(ctx).Warn("gateway.failover_entitlement_deterministic",
+			zap.Int64("account_id", accountID),
+			zap.Int("upstream_status", failoverErr.StatusCode),
+		)
+		return FailoverExhausted
+	}
 
 	// 同账号重试不算切换账号，粘性会话仅在实际切换时强制缓存计费。
 	retryCount := s.SameAccountRetryCount[accountID]

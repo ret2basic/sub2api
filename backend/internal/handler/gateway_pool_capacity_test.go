@@ -65,7 +65,7 @@ func TestPoolCapacityHandlerHappyPath(t *testing.T) {
 	h := &GatewayHandler{groupCapacity: &stubPoolCapacityReader{
 		summary: service.GroupCapacitySummary{
 			ConcurrencyUsed: 7,
-			ConcurrencyMax: 24,
+			ConcurrencyMax:  24,
 		},
 	}}
 	rec := requestPoolCapacityForTest(h, &service.APIKey{GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformZhipu}})
