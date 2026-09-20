@@ -32,6 +32,10 @@ FRONTEND_CRITICAL_VITEST := \
 	src/features/channel-monitor-v2/__tests__/monitorZoom.spec.ts \
 	src/components/admin/channel/__tests__/PricingEntryCard.modelDefaultPrice.spec.ts
 
+# 本机 systemd 部署的唯一 sanctioned 路径(健康门+自动回滚;2026-09-20 定规)
+deploy-local:
+	@sudo deploy/deploy-local-systemd.sh $(REPO_DIR)
+
 # 一键编译前后端
 build: build-backend build-frontend
 
