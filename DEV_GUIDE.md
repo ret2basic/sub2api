@@ -344,3 +344,18 @@ sub2api-bmai/
 - [Ent 文档](https://entgo.io/docs/getting-started)
 - [Vue3 文档](https://vuejs.org/)
 - [pnpm 文档](https://pnpm.io/)
+
+## 本机部署纪律(2026-09-20 定规,事故起源)
+
+**永远不要用裸 `go build` 的产物直接替换 `/opt/sub2api/sub2api`。** 2026-09-19 一次
+裸构建漏掉 `-tags=embed`,API 完全正常而管理面板全 404,直到 operator 打开
+`http://192.168.18.30:8080/` 才发现。唯一部署路径:
+
+```
+sudo deploy/deploy-local-systemd.sh <repo_dir> [--api-probe <pool_key>]
+# 或 make deploy-local REPO_DIR=<repo_dir>
+```
+
+脚本内置三道防线:只走 `make build-embed`(缺前端产物拒绝构建)、部署后面板必须在
+本机与 LAN 地址都返回 200(embed 门,精确捕获本次事故形态)、任一门失败自动回滚
+上一个二进制并复核。
