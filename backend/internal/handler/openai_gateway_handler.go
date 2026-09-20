@@ -913,6 +913,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
+					// 智谱 1311 是订阅级确定性错误：同套餐换号必然同答案，立即耗尽。
+					if service.ZhipuModelEntitlementError(failoverErr.ResponseBody) {
+						reqLog.Warn("openai_messages.failover_entitlement_deterministic",
+							zap.Int64("account_id", account.ID),
+							zap.Int("upstream_status", failoverErr.StatusCode),
+						)
+						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
+						return
+					}
 					if switchCount >= maxAccountSwitches {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
@@ -1585,6 +1594,16 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.anthropicStreamingAwareError(c, status, "api_error", message, streamStarted)
+		return
+	}
+	// 智谱 1311（模型不在订阅套餐内）：透传真实原因，不映射成 rate limit。
+	if failoverErr != nil && service.ZhipuModelEntitlementError(failoverErr.ResponseBody) {
+		message := strings.TrimSpace(service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody)))
+		if message == "" {
+			message = "upstream subscription does not include this model (zhipu 1311)"
+		}
+		service.SetOpsUpstreamError(c, http.StatusForbidden, message, "")
+		h.anthropicStreamingAwareError(c, http.StatusForbidden, "model_not_entitled", message, streamStarted)
 		return
 	}
 	if failoverErr != nil && failoverErr.IsOpenAICapacityShed() && strings.TrimSpace(failoverErr.ClientMessage) != "" {
