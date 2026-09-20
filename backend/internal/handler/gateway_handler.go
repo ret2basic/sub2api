@@ -1864,6 +1864,16 @@ func (h *GatewayHandler) handleConcurrencyError(c *gin.Context, err error, slotT
 func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, platform string, streamStarted bool) {
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
+	// 智谱 1311（模型不在订阅套餐内）：透传真实原因，不映射成 rate limit。
+	if service.ZhipuModelEntitlementError(responseBody) {
+		message := strings.TrimSpace(service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(responseBody)))
+		if message == "" {
+			message = "upstream subscription does not include this model (zhipu 1311)"
+		}
+		service.SetOpsUpstreamError(c, http.StatusForbidden, message, "")
+		h.handleStreamingAwareError(c, http.StatusForbidden, "model_not_entitled", message, streamStarted)
+		return
+	}
 	if service.IsOpenAISilentRefusalErrorBody(responseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage(), streamStarted)

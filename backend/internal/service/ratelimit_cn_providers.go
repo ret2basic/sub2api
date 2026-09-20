@@ -78,6 +78,14 @@ func zhipuTransientRateLimitCooldown(responseBody []byte) time.Duration {
 // 2026-09-19 事故：model=glm-5.3-flashX（不存在的模型名）的请求被上游每条都拒
 // 1311，网关把它当窗口耗尽冷却账号，再叠加账号故障转移，一条请求把整池 10 个号
 // 全部冷却到各自 5h 窗口重置点，GLM 池整体不可用。
+// ZhipuModelEntitlementError 对外暴露 1311 判定：网关层用它把「模型不在套餐内」
+// 与真正的限流/配额错误区分开——failover 循环对它立即耗尽（换号不可能改变订阅
+// 套餐），客户端响应透传真实原因（403 model_not_entitled），不再伪装成
+// "Upstream rate limit exceeded"。
+func ZhipuModelEntitlementError(responseBody []byte) bool {
+	return zhipuModelEntitlementError(responseBody)
+}
+
 func zhipuModelEntitlementError(responseBody []byte) bool {
 	if len(responseBody) == 0 {
 		return false
