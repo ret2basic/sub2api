@@ -26,11 +26,19 @@ type poolCapacityReader interface {
 	GetGroupCapacityByID(ctx context.Context, groupID int64) (service.GroupCapacitySummary, error)
 }
 
+// poolQuotaReader 是可选能力：能读池级额度窗口的容量服务（*service.GroupCapacityService）。
+// 2026-10-15 起客户端按额度配速在 GLM 池与 Grok 池之间选池，需要知道每个池的
+// 窗口烧得快还是慢；读不到时 quota 为 null，客户端退化为只看容量。
+type poolQuotaReader interface {
+	GetGroupQuotaByID(ctx context.Context, groupID int64, platform string) (*service.PoolQuotaSummary, error)
+}
+
 type poolCapacityResponse struct {
-	Platform                  string `json:"platform"`
-	AvailableSlots            int    `json:"available_slots"`
-	ConcurrencyUsed           int    `json:"concurrency_used"`
-	RecommendedMaxConcurrency int    `json:"recommended_max_concurrency"`
+	Platform                  string                    `json:"platform"`
+	AvailableSlots            int                       `json:"available_slots"`
+	ConcurrencyUsed           int                       `json:"concurrency_used"`
+	RecommendedMaxConcurrency int                       `json:"recommended_max_concurrency"`
+	Quota                     *service.PoolQuotaSummary `json:"quota"`
 }
 
 // buildPoolCapacityRecommended 从可调度槽位数推导推荐总并发：
@@ -67,11 +75,19 @@ func (h *GatewayHandler) PoolCapacity(c *gin.Context) {
 		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Pool capacity query failed")
 		return
 	}
+	// 额度是附加信息：读失败只省略 quota，绝不让容量查询本身失败。
+	var quota *service.PoolQuotaSummary
+	if reader, ok := h.groupCapacity.(poolQuotaReader); ok && apiKey.Group != nil {
+		if q, qerr := reader.GetGroupQuotaByID(c.Request.Context(), *apiKey.GroupID, apiKey.Group.Platform); qerr == nil {
+			quota = q
+		}
+	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, poolCapacityResponse{
 		Platform:                  apiKey.Group.Platform,
 		AvailableSlots:            summary.ConcurrencyMax,
 		ConcurrencyUsed:           summary.ConcurrencyUsed,
 		RecommendedMaxConcurrency: buildPoolCapacityRecommendation(summary.ConcurrencyMax),
+		Quota:                     quota,
 	})
 }
