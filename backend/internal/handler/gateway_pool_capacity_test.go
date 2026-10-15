@@ -107,3 +107,76 @@ func TestBuildPoolCapacityRecommendation(t *testing.T) {
 		}
 	}
 }
+
+// 2026-10-15 quota 字段：读得到就带上，读不到（或容量服务不支持）就是 null，
+// 容量部分永远不受影响。
+
+type stubPoolCapacityQuotaReader struct {
+	stubPoolCapacityReader
+	quota       *service.PoolQuotaSummary
+	quotaErr    error
+	gotGroupID  int64
+	gotPlatform string
+}
+
+func (s *stubPoolCapacityQuotaReader) GetGroupQuotaByID(ctx context.Context, groupID int64, platform string) (*service.PoolQuotaSummary, error) {
+	s.gotGroupID, s.gotPlatform = groupID, platform
+	return s.quota, s.quotaErr
+}
+
+func decodePoolCapacityQuota(t *testing.T, rec *httptest.ResponseRecorder) (map[string]any, bool) {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	raw, present := body["quota"]
+	if !present {
+		t.Fatalf("quota key missing: %s", rec.Body.String())
+	}
+	quota, _ := raw.(map[string]any)
+	return quota, raw != nil
+}
+
+func TestPoolCapacityHandlerIncludesQuota(t *testing.T) {
+	groupID := int64(12)
+	reader := &stubPoolCapacityQuotaReader{
+		stubPoolCapacityReader: stubPoolCapacityReader{summary: service.GroupCapacitySummary{ConcurrencyMax: 2}},
+		quota: &service.PoolQuotaSummary{BindingWindow: "weekly", UsedFraction: 0.3, ElapsedFraction: 0.5, Pace: 0.6, PaceKnown: true,
+			WindowSeconds: 604800, AccountsReporting: 1},
+	}
+	h := &GatewayHandler{groupCapacity: reader}
+	rec := requestPoolCapacityForTest(h, &service.APIKey{GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformGrok}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	quota, ok := decodePoolCapacityQuota(t, rec)
+	if !ok || quota["binding_window"] != "weekly" || quota["pace"] != 0.6 || quota["pace_known"] != true {
+		t.Fatalf("quota = %v", quota)
+	}
+	if reader.gotGroupID != groupID || reader.gotPlatform != service.PlatformGrok {
+		t.Fatalf("quota lookup used group %d platform %q", reader.gotGroupID, reader.gotPlatform)
+	}
+}
+
+func TestPoolCapacityHandlerQuotaNullWhenUnavailable(t *testing.T) {
+	groupID := int64(9)
+	apiKey := &service.APIKey{GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformZhipu}}
+	// 不支持 quota 的容量服务（老实现 / 测试桩）。
+	rec := requestPoolCapacityForTest(&GatewayHandler{groupCapacity: &stubPoolCapacityReader{summary: service.GroupCapacitySummary{ConcurrencyMax: 6}}}, apiKey)
+	if _, ok := decodePoolCapacityQuota(t, rec); ok {
+		t.Fatalf("quota should be null without a quota reader: %s", rec.Body.String())
+	}
+	// 读额度出错：容量照常 200，quota 为 null。
+	failing := &stubPoolCapacityQuotaReader{
+		stubPoolCapacityReader: stubPoolCapacityReader{summary: service.GroupCapacitySummary{ConcurrencyMax: 6}},
+		quotaErr:               context.DeadlineExceeded,
+	}
+	rec = requestPoolCapacityForTest(&GatewayHandler{groupCapacity: failing}, apiKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 even when quota fails", rec.Code)
+	}
+	if _, ok := decodePoolCapacityQuota(t, rec); ok {
+		t.Fatalf("quota should be null when the lookup fails: %s", rec.Body.String())
+	}
+}
