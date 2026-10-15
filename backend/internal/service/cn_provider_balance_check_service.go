@@ -19,6 +19,18 @@ type cnQuotaProber interface {
 // cnQuotaProbeConcurrency 周期任务并发探测额度账号的并发度。
 const cnQuotaProbeConcurrency = 4
 
+// grokBillingProber 抽象 Grok 账单探测（*GrokQuotaService 实现，测试可替换）。
+// 只调 xAI billing 端点，不发推理请求、不消耗模型额度。
+type grokBillingProber interface {
+	ProbeBilling(ctx context.Context, accountID int64) (*GrokQuotaProbeResult, error)
+}
+
+const (
+	// grokBillingRefreshMinAge：快照比这更新就不重探，避免每轮都打 billing 端点。
+	grokBillingRefreshMinAge    = 15 * time.Minute
+	grokBillingProbeConcurrency = 2
+)
+
 // CNProviderBalanceCheckService 周期性探测国产供应商账号：
 //   - payg（按量付费）：余额低于阈值则临时停调，恢复则清除（仅清除本服务写入的停调）；
 //   - coding plan：调用 CNProviderQuotaService 探测 5h/weekly 滚动窗口并落 extra 快照，
@@ -31,6 +43,7 @@ type CNProviderBalanceCheckService struct {
 	accountRepo    AccountRepository
 	balanceService *CNProviderBalanceService
 	quotaService   cnQuotaProber
+	grokBilling    grokBillingProber
 	cfg            *config.Config
 	interval       time.Duration
 	stopCh         chan struct{}
@@ -55,6 +68,15 @@ func NewCNProviderBalanceCheckService(
 		interval:       interval,
 		stopCh:         make(chan struct{}),
 	}
+}
+
+// SetGrokBillingProber 让周期任务顺带刷新 Grok 订阅号的 billing 周窗口快照
+// （2026-10-15：池级额度 quota 字段据此给 GLM/Grok 选池配速）。
+func (s *CNProviderBalanceCheckService) SetGrokBillingProber(prober grokBillingProber) {
+	if s == nil {
+		return
+	}
+	s.grokBilling = prober
 }
 
 func (s *CNProviderBalanceCheckService) Start() {
@@ -191,6 +213,59 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	if paused > 0 || cleared > 0 {
 		log.Printf("[CNBalance] paused=%d cleared=%d (threshold=%.2f)", paused, cleared, threshold)
 	}
+
+	s.refreshGrokBilling()
+}
+
+// refreshGrokBilling 刷新 Grok OAuth 订阅号的 billing 快照（周窗口用量与起止时间）。
+// 只看 active 账号、只刷新比 grokBillingRefreshMinAge 旧的快照；失败只记日志。
+func (s *CNProviderBalanceCheckService) refreshGrokBilling() {
+	if s.grokBilling == nil || s.accountRepo == nil {
+		return
+	}
+	accounts, err := s.accountRepo.ListByPlatform(context.Background(), PlatformGrok)
+	if err != nil {
+		log.Printf("[GrokBilling] list grok accounts failed: %v", err)
+		return
+	}
+	now := time.Now()
+	var targets []int64
+	for i := range accounts {
+		account := &accounts[i]
+		if !account.IsActive() || account.Type != AccountTypeOAuth {
+			continue
+		}
+		if snapshot, ok := account.Extra[grokBillingExtraKey].(map[string]any); ok {
+			if updated, ok := quotaTime(snapshot["updated_at"]); ok && now.Sub(updated) < grokBillingRefreshMinAge {
+				continue
+			}
+		}
+		targets = append(targets, account.ID)
+	}
+	if len(targets) == 0 {
+		return
+	}
+	batches := (len(targets) + grokBillingProbeConcurrency - 1) / grokBillingProbeConcurrency
+	timeout := 30*time.Second + time.Duration(batches)*15*time.Second
+	if timeout > 120*time.Second {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	sem := make(chan struct{}, grokBillingProbeConcurrency)
+	var wg sync.WaitGroup
+	for _, id := range targets {
+		wg.Add(1)
+		go func(accountID int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if _, err := s.grokBilling.ProbeBilling(ctx, accountID); err != nil {
+				log.Printf("[GrokBilling] billing probe account %d failed: %v", accountID, err)
+			}
+		}(id)
+	}
+	wg.Wait()
 }
 
 // probeQuota 探测单个 coding plan 账号的滚动窗口用量并落 extra 快照。

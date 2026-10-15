@@ -315,6 +315,7 @@ func ProvideCNProviderBalanceCheckService(
 	accountRepo AccountRepository,
 	balanceService *CNProviderBalanceService,
 	quotaService *CNProviderQuotaService,
+	grokQuotaService *GrokQuotaService,
 	cfg *config.Config,
 ) *CNProviderBalanceCheckService {
 	minutes := 10
@@ -322,6 +323,9 @@ func ProvideCNProviderBalanceCheckService(
 		minutes = cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes
 	}
 	svc := NewCNProviderBalanceCheckService(accountRepo, balanceService, quotaService, cfg, time.Duration(minutes)*time.Minute)
+	if grokQuotaService != nil {
+		svc.SetGrokBillingProber(grokQuotaService)
+	}
 	svc.Start()
 	return svc
 }
