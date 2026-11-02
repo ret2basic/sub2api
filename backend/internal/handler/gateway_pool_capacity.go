@@ -34,11 +34,13 @@ type poolQuotaReader interface {
 }
 
 type poolCapacityResponse struct {
-	Platform                  string                    `json:"platform"`
-	AvailableSlots            int                       `json:"available_slots"`
-	ConcurrencyUsed           int                       `json:"concurrency_used"`
-	RecommendedMaxConcurrency int                       `json:"recommended_max_concurrency"`
-	Quota                     *service.PoolQuotaSummary `json:"quota"`
+	Platform                  string `json:"platform"`
+	AvailableSlots            int    `json:"available_slots"`
+	ConcurrencyUsed           int    `json:"concurrency_used"`
+	RecommendedMaxConcurrency int    `json:"recommended_max_concurrency"`
+	// ConcurrencyUsedByModel 是按模型分桶的在途槽位（2026-11-02 起；分桶槽位此前不计入任何字段）。
+	ConcurrencyUsedByModel map[string]int            `json:"concurrency_used_by_model,omitempty"`
+	Quota                  *service.PoolQuotaSummary `json:"quota"`
 }
 
 // buildPoolCapacityRecommended 从可调度槽位数推导推荐总并发：
@@ -88,6 +90,7 @@ func (h *GatewayHandler) PoolCapacity(c *gin.Context) {
 		AvailableSlots:            summary.ConcurrencyMax,
 		ConcurrencyUsed:           summary.ConcurrencyUsed,
 		RecommendedMaxConcurrency: buildPoolCapacityRecommendation(summary.ConcurrencyMax),
+		ConcurrencyUsedByModel:    summary.ConcurrencyUsedByModel,
 		Quota:                     quota,
 	})
 }

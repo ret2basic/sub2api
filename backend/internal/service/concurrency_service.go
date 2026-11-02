@@ -72,6 +72,12 @@ type ScopedAccountConcurrencyCache interface {
 	GetAccountsLoadBatchScoped(ctx context.Context, accounts []AccountWithConcurrency, scope string) (map[int64]*AccountLoadInfo, error)
 }
 
+// ScopedAccountConcurrencyReader 是分桶槽位的只读扩展，供分组容量汇总使用。
+// 未实现它的 cache 视为没有分桶占用，容量汇总保持原行为。
+type ScopedAccountConcurrencyReader interface {
+	GetAccountScopedConcurrencyBatch(ctx context.Context, accountIDs []int64, scopes []string) (map[int64]map[string]int, error)
+}
+
 // OpenAIWSIngressLeaseCache owns the short-lived distributed lease used to
 // bound live client WebSocket sessions. It is deliberately independent of the
 // request-slot namespace: idle ingress connections do not occupy turn slots.
@@ -844,6 +850,27 @@ func (s *ConcurrencyService) StartSlotCleanupWorker(_ AccountRepository, interva
 			runCleanup()
 		}
 	}()
+}
+
+// GetAccountScopedConcurrencyBatch 返回各账号在给定模型分桶上的在途槽位数
+// （accountID → scope → 在途数）。cache 不支持分桶读取或读取失败时返回空表：
+// 容量汇总宁可少报，也不因 Redis 抖动失败。
+func (s *ConcurrencyService) GetAccountScopedConcurrencyBatch(ctx context.Context, accountIDs []int64, scopes []string) map[int64]map[string]int {
+	empty := map[int64]map[string]int{}
+	if s == nil || len(accountIDs) == 0 || len(scopes) == 0 {
+		return empty
+	}
+	reader, ok := s.cache.(ScopedAccountConcurrencyReader)
+	if !ok {
+		return empty
+	}
+	redisCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	counts, err := reader.GetAccountScopedConcurrencyBatch(redisCtx, accountIDs, scopes)
+	if err != nil || counts == nil {
+		return empty
+	}
+	return counts
 }
 
 // GetAccountConcurrencyBatch gets current concurrency counts for multiple accounts.

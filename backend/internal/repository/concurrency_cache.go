@@ -696,6 +696,56 @@ func (c *concurrencyCache) GetAccountConcurrency(ctx context.Context, accountID 
 	return result, nil
 }
 
+// GetAccountScopedConcurrencyBatch 读取账号在若干模型分桶上的在途槽位数（先清理过期成员）。
+// 分桶槽位落在 concurrency:account:{id}:m:{scope}，账号级批量读取看不到它们；2026-11-02
+// 发现 GLM 的 pool-capacity concurrency_used 因此恒为 0。返回 accountID → scope → 在途数，
+// 只含大于 0 的项。
+func (c *concurrencyCache) GetAccountScopedConcurrencyBatch(ctx context.Context, accountIDs []int64, scopes []string) (map[int64]map[string]int, error) {
+	result := make(map[int64]map[string]int, len(accountIDs))
+	if len(accountIDs) == 0 || len(scopes) == 0 {
+		return result, nil
+	}
+
+	now, err := c.rdb.Time(ctx).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redis TIME: %w", err)
+	}
+	cutoff := strconv.FormatInt(now.Unix()-int64(c.slotTTLSeconds), 10)
+
+	type scopedCmd struct {
+		accountID int64
+		scope     string
+		zcardCmd  *redis.IntCmd
+	}
+	pipe := c.rdb.Pipeline()
+	cmds := make([]scopedCmd, 0, len(accountIDs)*len(scopes))
+	for _, accountID := range accountIDs {
+		for _, scope := range scopes {
+			if scope == "" {
+				continue
+			}
+			key := accountSlotKeyScoped(accountID, scope)
+			pipe.ZRemRangeByScore(ctx, key, "-inf", cutoff)
+			cmds = append(cmds, scopedCmd{accountID: accountID, scope: scope, zcardCmd: pipe.ZCard(ctx, key)})
+		}
+	}
+	if len(cmds) == 0 {
+		return result, nil
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("pipeline exec: %w", err)
+	}
+	for _, cmd := range cmds {
+		if n := int(cmd.zcardCmd.Val()); n > 0 {
+			if result[cmd.accountID] == nil {
+				result[cmd.accountID] = make(map[string]int, len(scopes))
+			}
+			result[cmd.accountID][cmd.scope] = n
+		}
+	}
+	return result, nil
+}
+
 func (c *concurrencyCache) GetAccountConcurrencyBatch(ctx context.Context, accountIDs []int64) (map[int64]int, error) {
 	if len(accountIDs) == 0 {
 		return map[int64]int{}, nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -178,5 +179,27 @@ func TestPoolCapacityHandlerQuotaNullWhenUnavailable(t *testing.T) {
 	}
 	if _, ok := decodePoolCapacityQuota(t, rec); ok {
 		t.Fatalf("quota should be null when the lookup fails: %s", rec.Body.String())
+	}
+}
+
+// 2026-11-02：分桶在途数要随响应带出（concurrency_used_by_model），否则工具看不到 flash 桶。
+func TestPoolCapacityHandlerReportsModelBuckets(t *testing.T) {
+	groupID := int64(9)
+	h := &GatewayHandler{groupCapacity: &stubPoolCapacityReader{
+		summary: service.GroupCapacitySummary{
+			ConcurrencyUsed:        6,
+			ConcurrencyMax:         60,
+			ConcurrencyUsedByModel: map[string]int{"glm-5.3": 5, "glm-5.3-flash": 7},
+		},
+	}}
+	rec := requestPoolCapacityForTest(h, &service.APIKey{GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformZhipu}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"concurrency_used":6`, `"recommended_max_concurrency":48`, `"concurrency_used_by_model":{"glm-5.3":5,"glm-5.3-flash":7}`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("响应缺少 %s：%s", want, body)
+		}
 	}
 }
