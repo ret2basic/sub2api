@@ -20,6 +20,9 @@ type GroupCapacitySummary struct {
 	// 里配置的模型）。上限大于账号并发的桶（如 glm-5.3-flash）只出现在这里，不计入
 	// ConcurrencyUsed。
 	ConcurrencyUsedByModel map[string]int `json:"concurrency_used_by_model,omitempty"`
+	// ConcurrencyMaxByModel 是各模型分桶的容量：该模型所属平台的可调度账号上，每号
+	// 模型上限之和。只在单分组汇总（pool-capacity 用的 GetGroupCapacityByID）里给出。
+	ConcurrencyMaxByModel map[string]int `json:"concurrency_max_by_model,omitempty"`
 }
 
 // GroupAccountCapacityRow is the lightweight account projection needed for
@@ -136,6 +139,36 @@ func (s *GroupCapacityService) scopedUsage(ctx context.Context, accountIDs []int
 		}
 	}
 	return counted, perAccount
+}
+
+// modelCapacity 按模型给出分桶容量：模型所属平台（DetectModelPlatform）的可调度账号上，
+// 每号模型上限之和。zk-saber 2026-11-02 提出：只有占用、没有容量时，工具只能拿全池的
+// recommended 减 glm-5.3 的占用去算 flash 余量，flash 被 glm-5.3 拖住。识别不出平台的模型
+// 不给容量（宁缺勿错）；没有任何适用模型时返回 nil。
+func (s *GroupCapacityService) modelCapacity(accounts []Account) map[string]int {
+	if len(s.modelConcurrency) == 0 || len(accounts) == 0 {
+		return nil
+	}
+	var out map[string]int
+	for scope, limit := range s.modelConcurrency {
+		platform, ok := DetectModelPlatform(scope)
+		if !ok || limit <= 0 {
+			continue
+		}
+		total := 0
+		for i := range accounts {
+			if accounts[i].Platform == platform {
+				total += limit
+			}
+		}
+		if total > 0 {
+			if out == nil {
+				out = map[string]int{}
+			}
+			out[scope] = total
+		}
+	}
+	return out
 }
 
 // addModelUsage 把一个账号的分桶在途数累加进汇总。
@@ -364,6 +397,7 @@ func (s *GroupCapacityService) GetGroupCapacityByID(ctx context.Context, groupID
 	// Batch query runtime data from Redis
 	concurrencyMap, _ := s.concurrencyService.GetAccountConcurrencyBatch(ctx, accountIDs)
 	scopedCounted, scopedPerAccount := s.scopedUsage(ctx, accountIDs, accountConcurrency)
+	maxByModel := s.modelCapacity(accounts)
 
 	var sessionsMap map[int64]int
 	if sessionsMax > 0 && s.sessionLimitCache != nil {
@@ -397,5 +431,6 @@ func (s *GroupCapacityService) GetGroupCapacityByID(ctx context.Context, groupID
 		RPMUsed:                rpmUsed,
 		RPMMax:                 rpmMax,
 		ConcurrencyUsedByModel: byModel.ConcurrencyUsedByModel,
+		ConcurrencyMaxByModel:  maxByModel,
 	}, nil
 }

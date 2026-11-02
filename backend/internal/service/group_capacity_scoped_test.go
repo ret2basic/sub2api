@@ -50,16 +50,17 @@ func newScopedCapacityCache() *scopedCapacityCacheStub {
 
 func TestGroupCapacityByIDCountsSameUnitModelBuckets(t *testing.T) {
 	cache := newScopedCapacityCache()
-	repo := &scopedCapacityAccountRepoStub{accounts: []Account{{ID: 1, Concurrency: 6}, {ID: 2, Concurrency: 6}}}
+	repo := &scopedCapacityAccountRepoStub{accounts: []Account{{ID: 1, Concurrency: 6, Platform: PlatformZhipu}, {ID: 2, Concurrency: 6, Platform: PlatformZhipu}}}
 	svc := NewGroupCapacityService(repo, nil, NewConcurrencyService(cache), nil, nil)
-	svc.SetModelConcurrency(map[string]int{"glm-5.3": 6, "glm-5.3-flash": 50, "": 9, "zero": 0})
+	svc.SetModelConcurrency(map[string]int{"glm-5.3": 6, "glm-5.3-flash": 50, "": 9, "zero": 0, "mystery-model": 4})
 
 	summary, err := svc.GetGroupCapacityByID(context.Background(), 9)
 	require.NoError(t, err)
-	require.Equal(t, []string{"glm-5.3", "glm-5.3-flash"}, cache.requestedScopes)
+	require.Equal(t, []string{"glm-5.3", "glm-5.3-flash", "mystery-model"}, cache.requestedScopes)
 	require.Equal(t, 12, summary.ConcurrencyMax)
 	require.Equal(t, 1+2+3, summary.ConcurrencyUsed, "账号级 1 + glm-5.3 桶 5；flash 桶不计入")
 	require.Equal(t, map[string]int{"glm-5.3": 5, "glm-5.3-flash": 7}, summary.ConcurrencyUsedByModel)
+	require.Equal(t, map[string]int{"glm-5.3": 12, "glm-5.3-flash": 100}, summary.ConcurrencyMaxByModel, "识别不出平台的模型不给容量")
 }
 
 func TestGroupCapacityBatchSplitsModelBucketsPerGroup(t *testing.T) {
@@ -91,5 +92,19 @@ func TestGroupCapacityWithoutModelConcurrencyKeepsOldBehaviour(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, cache.requestedScopes, "没配分桶时不去读分桶键")
 	require.Equal(t, 1, summary.ConcurrencyUsed)
+	require.Nil(t, summary.ConcurrencyUsedByModel)
+}
+
+func TestGroupCapacityByIDGivesNoGLMCapacityToOtherPlatforms(t *testing.T) {
+	cache := newScopedCapacityCache()
+	cache.scoped = nil
+	repo := &scopedCapacityAccountRepoStub{accounts: []Account{{ID: 25, Concurrency: 5, Platform: PlatformGrok}, {ID: 26, Concurrency: 5, Platform: PlatformGrok}}}
+	svc := NewGroupCapacityService(repo, nil, NewConcurrencyService(cache), nil, nil)
+	svc.SetModelConcurrency(map[string]int{"glm-5.3": 6, "glm-5.3-flash": 50})
+
+	summary, err := svc.GetGroupCapacityByID(context.Background(), 16)
+	require.NoError(t, err)
+	require.Equal(t, 10, summary.ConcurrencyMax)
+	require.Nil(t, summary.ConcurrencyMaxByModel, "Grok 池不该出现 glm 的分桶容量")
 	require.Nil(t, summary.ConcurrencyUsedByModel)
 }

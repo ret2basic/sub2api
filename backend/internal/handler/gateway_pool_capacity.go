@@ -39,8 +39,12 @@ type poolCapacityResponse struct {
 	ConcurrencyUsed           int    `json:"concurrency_used"`
 	RecommendedMaxConcurrency int    `json:"recommended_max_concurrency"`
 	// ConcurrencyUsedByModel 是按模型分桶的在途槽位（2026-11-02 起；分桶槽位此前不计入任何字段）。
-	ConcurrencyUsedByModel map[string]int            `json:"concurrency_used_by_model,omitempty"`
-	Quota                  *service.PoolQuotaSummary `json:"quota"`
+	ConcurrencyUsedByModel map[string]int `json:"concurrency_used_by_model,omitempty"`
+	// AvailableSlotsByModel / RecommendedMaxConcurrencyByModel 是各模型分桶的容量与推荐并发，
+	// 口径同 available_slots / recommended_max_concurrency，供工具按桶算余量（2026-11-02）。
+	AvailableSlotsByModel            map[string]int            `json:"available_slots_by_model,omitempty"`
+	RecommendedMaxConcurrencyByModel map[string]int            `json:"recommended_max_concurrency_by_model,omitempty"`
+	Quota                            *service.PoolQuotaSummary `json:"quota"`
 }
 
 // buildPoolCapacityRecommended 从可调度槽位数推导推荐总并发：
@@ -58,6 +62,18 @@ func buildPoolCapacityRecommendation(availableSlots int) int {
 
 // PoolCapacity 返回认证 key 所属分组（池）的有效并发容量。
 // GET /v1/sub2api/pool-capacity
+// recommendationsByModel 对每个模型桶套用与全池相同的推荐口径。
+func recommendationsByModel(maxByModel map[string]int) map[string]int {
+	if len(maxByModel) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(maxByModel))
+	for model, slots := range maxByModel {
+		out[model] = buildPoolCapacityRecommendation(slots)
+	}
+	return out
+}
+
 func (h *GatewayHandler) PoolCapacity(c *gin.Context) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
@@ -86,11 +102,13 @@ func (h *GatewayHandler) PoolCapacity(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, poolCapacityResponse{
-		Platform:                  apiKey.Group.Platform,
-		AvailableSlots:            summary.ConcurrencyMax,
-		ConcurrencyUsed:           summary.ConcurrencyUsed,
-		RecommendedMaxConcurrency: buildPoolCapacityRecommendation(summary.ConcurrencyMax),
-		ConcurrencyUsedByModel:    summary.ConcurrencyUsedByModel,
-		Quota:                     quota,
+		Platform:                         apiKey.Group.Platform,
+		AvailableSlots:                   summary.ConcurrencyMax,
+		ConcurrencyUsed:                  summary.ConcurrencyUsed,
+		RecommendedMaxConcurrency:        buildPoolCapacityRecommendation(summary.ConcurrencyMax),
+		ConcurrencyUsedByModel:           summary.ConcurrencyUsedByModel,
+		AvailableSlotsByModel:            summary.ConcurrencyMaxByModel,
+		RecommendedMaxConcurrencyByModel: recommendationsByModel(summary.ConcurrencyMaxByModel),
+		Quota:                            quota,
 	})
 }
