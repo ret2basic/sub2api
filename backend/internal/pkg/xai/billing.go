@@ -19,7 +19,7 @@ const (
 	// repository and service layers build their own client identity from it, so
 	// one bump here covers OAuth traffic and billing probes together.
 	// Keep in sync with https://x.ai/cli/stable.
-	CLIClientVersion = "1.0.46"
+	CLIClientVersion = "1.0.70"
 
 	BillingWeeklyPath  = "/billing?format=credits"
 	BillingMonthlyPath = "/billing"
