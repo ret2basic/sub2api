@@ -190,6 +190,7 @@ func TestPoolCapacityHandlerReportsModelBuckets(t *testing.T) {
 			ConcurrencyUsed:        6,
 			ConcurrencyMax:         60,
 			ConcurrencyUsedByModel: map[string]int{"glm-5.3": 5, "glm-5.3-flash": 7},
+			ConcurrencyMaxByModel:  map[string]int{"glm-5.3": 60, "glm-5.3-flash": 500},
 		},
 	}}
 	rec := requestPoolCapacityForTest(h, &service.APIKey{GroupID: &groupID, Group: &service.Group{ID: groupID, Platform: service.PlatformZhipu}})
@@ -197,7 +198,9 @@ func TestPoolCapacityHandlerReportsModelBuckets(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`"concurrency_used":6`, `"recommended_max_concurrency":48`, `"concurrency_used_by_model":{"glm-5.3":5,"glm-5.3-flash":7}`} {
+	for _, want := range []string{`"concurrency_used":6`, `"recommended_max_concurrency":48`, `"concurrency_used_by_model":{"glm-5.3":5,"glm-5.3-flash":7}`,
+		`"available_slots_by_model":{"glm-5.3":60,"glm-5.3-flash":500}`,
+		`"recommended_max_concurrency_by_model":{"glm-5.3":48,"glm-5.3-flash":400}`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("响应缺少 %s：%s", want, body)
 		}
