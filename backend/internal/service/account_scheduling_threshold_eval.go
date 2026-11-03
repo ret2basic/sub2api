@@ -343,13 +343,52 @@ func grokThresholdCandidates(account *Account) []*accountSchedulingThresholdCand
 	if account == nil {
 		return nil
 	}
-	return []*accountSchedulingThresholdCandidate{
+	candidates := []*accountSchedulingThresholdCandidate{
 		{
 			window:      "quota",
 			scope:       "grok",
 			usedPercent: schedulingPercentValue(account.Extra["grok_sched_utilization"]),
 			until:       parseSchedulingResetAt(account.Extra["grok_sched_reset_at"]),
 		},
+	}
+	// fuhrer 二开：账号单独设了阈值覆盖（credentials.account_scheduling_threshold）时，再把官方账单
+	// 周窗口计入。2026-11-03 operator 要给一个和 Grok Bot 共用额度的号留出硬性余量；这类号的滚动窗口
+	// 读数常年是 0，真正在耗的是账单周额度，只看滚动窗口留不住余量。平台级阈值保持上游行为不变。
+	if _, ok := accountSchedulingThresholdOverride(account); ok {
+		if billing := grokBillingThresholdCandidate(account); billing != nil {
+			candidates = append(candidates, billing)
+		}
+	}
+	return candidates
+}
+
+// grokBillingThresholdCandidate 读 grok_billing_snapshot 的 usage_percent / period_end（账单探测每 10 分钟
+// 刷新一次）。快照可能还是刚写入时的结构体，统一转成 map 再取值；缺用量或缺期末时不参与判定。
+func grokBillingThresholdCandidate(account *Account) *accountSchedulingThresholdCandidate {
+	raw, ok := account.Extra[grokBillingExtraKey]
+	if !ok || raw == nil {
+		return nil
+	}
+	snapshot, ok := raw.(map[string]any)
+	if !ok {
+		data, err := json.Marshal(raw)
+		if err != nil || json.Unmarshal(data, &snapshot) != nil {
+			return nil
+		}
+	}
+	usage, ok := snapshot["usage_percent"]
+	if !ok || usage == nil {
+		return nil
+	}
+	until := parseSchedulingResetAt(snapshot["period_end"])
+	if until == nil {
+		return nil
+	}
+	return &accountSchedulingThresholdCandidate{
+		window:      "billing",
+		scope:       "grok_billing",
+		usedPercent: schedulingPercentValue(usage),
+		until:       until,
 	}
 }
 
