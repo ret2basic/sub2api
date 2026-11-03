@@ -528,3 +528,71 @@ func TestEvaluateAccountSchedulingThreshold_GrokUsesOnlyHeaderQuotaWindow(t *tes
 	require.NotNil(t, decision.Until)
 	require.True(t, headerUntil.Equal(*decision.Until))
 }
+
+// fuhrer 二开：账号级阈值覆盖时把 Grok 官方账单周窗口计入（2026-11-03 给 Grok Bot 共用的号留余量）。
+func grokBillingAccount(override any, usage any, periodEnd any) *Account {
+	account := &Account{
+		Platform:    PlatformGrok,
+		Credentials: map[string]any{},
+		Extra: map[string]any{
+			"grok_sched_utilization": 0,
+			grokBillingExtraKey: map[string]any{
+				"usage_percent": usage,
+				"period_end":    periodEnd,
+				"period_type":   "weekly",
+			},
+		},
+	}
+	if override != nil {
+		account.Credentials[accountSchedulingThresholdCredentialKey] = override
+	}
+	return account
+}
+
+func TestEvaluateAccountSchedulingThreshold_GrokOverrideCountsBillingWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	end := "2026-11-05T16:56:41.791+00:00"
+	decision := EvaluateAccountSchedulingThreshold(grokBillingAccount(94, 95, end), map[string]int{PlatformGrok: 100}, now)
+	require.True(t, decision.ShouldPause)
+	require.Equal(t, "billing", decision.Window)
+	require.Equal(t, 94, decision.ThresholdPercent)
+	require.NotNil(t, decision.Until)
+	require.Equal(t, time.Date(2026, 11, 5, 16, 56, 41, 791000000, time.UTC), decision.Until.UTC())
+
+	below := EvaluateAccountSchedulingThreshold(grokBillingAccount("94", 93, end), map[string]int{PlatformGrok: 100}, now)
+	require.False(t, below.ShouldPause, "没到线不停")
+}
+
+func TestEvaluateAccountSchedulingThreshold_GrokPlatformThresholdIgnoresBillingWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	end := "2026-11-05T16:56:41.791+00:00"
+	decision := EvaluateAccountSchedulingThreshold(grokBillingAccount(nil, 99, end), map[string]int{PlatformGrok: 90}, now)
+	require.False(t, decision.ShouldPause, "没有账号级覆盖时保持上游行为：只看滚动窗口")
+}
+
+func TestEvaluateAccountSchedulingThreshold_GrokBillingWindowNeedsFuturePeriodEnd(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	decision := EvaluateAccountSchedulingThreshold(grokBillingAccount(94, 99, "2026-11-05T16:56:41Z"), nil, now)
+	require.False(t, decision.ShouldPause, "账单期已过，等新一期快照")
+	missing := EvaluateAccountSchedulingThreshold(grokBillingAccount(94, 99, nil), nil, now)
+	require.False(t, missing.ShouldPause)
+}
+
+func TestEvaluateAccountSchedulingThreshold_GrokBillingSnapshotStruct(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	account := grokBillingAccount(94, nil, nil)
+	account.Extra[grokBillingExtraKey] = struct {
+		UsagePercent int    `json:"usage_percent"`
+		PeriodEnd    string `json:"period_end"`
+	}{UsagePercent: 96, PeriodEnd: "2026-11-05T16:56:41Z"}
+	decision := EvaluateAccountSchedulingThreshold(account, nil, now)
+	require.True(t, decision.ShouldPause, "刚写入时还是结构体，也要认得")
+}
