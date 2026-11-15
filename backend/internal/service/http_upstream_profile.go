@@ -11,6 +11,10 @@ const (
 	HTTPUpstreamProfileOpenAI     HTTPUpstreamProfile = "openai"
 	HTTPUpstreamProfileGrok       HTTPUpstreamProfile = "grok"
 	HTTPUpstreamProfileLongStream HTTPUpstreamProfile = "long_stream"
+	// HTTPUpstreamProfileControlPlane isolates short quota/billing probes from
+	// long-running inference streams that may occupy every connection in an
+	// account-scoped transport pool.
+	HTTPUpstreamProfileControlPlane HTTPUpstreamProfile = "control_plane"
 )
 
 type httpUpstreamProfileContextKey struct{}
@@ -38,7 +42,7 @@ func HTTPUpstreamProfileFromContext(ctx context.Context) HTTPUpstreamProfile {
 		return HTTPUpstreamProfileDefault
 	}
 	switch profile {
-	case HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileGrok, HTTPUpstreamProfileLongStream:
+	case HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileGrok, HTTPUpstreamProfileLongStream, HTTPUpstreamProfileControlPlane:
 		return profile
 	default:
 		return HTTPUpstreamProfileDefault

@@ -103,6 +103,7 @@ const (
 	upstreamProtocolModeOpenAIH2         = "openai_h2"
 	upstreamProtocolModeOpenAIH1Fallback = "openai_h1_fallback"
 	upstreamProtocolModeGrok             = "grok"
+	upstreamProtocolModeControlPlane     = "control_plane"
 )
 
 var errUpstreamClientLimitReached = errors.New("upstream client cache limit reached")
@@ -1070,6 +1071,12 @@ func (s *httpUpstreamService) resolveOpenAIHTTP2Settings() openAIHTTP2Settings {
 }
 
 func (s *httpUpstreamService) resolveProtocolMode(profile service.HTTPUpstreamProfile, proxyKey string, parsedProxy *url.URL) string {
+	if profile == service.HTTPUpstreamProfileControlPlane {
+		// The protocol mode is also part of the client cache key. Keeping a
+		// distinct mode here gives quota/billing probes their own Transport, so
+		// account-scoped inference connections cannot starve the control plane.
+		return upstreamProtocolModeControlPlane
+	}
 	if profile == service.HTTPUpstreamProfileLongStream {
 		return upstreamProtocolModeLongStreamH2
 	}

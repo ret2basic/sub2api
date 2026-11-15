@@ -27,6 +27,13 @@ func TestWithHTTPUpstreamProfile_LongStream(t *testing.T) {
 	}
 }
 
+func TestWithHTTPUpstreamProfile_ControlPlane(t *testing.T) {
+	ctx := WithHTTPUpstreamProfile(context.TODO(), HTTPUpstreamProfileControlPlane)
+	if profile := HTTPUpstreamProfileFromContext(ctx); profile != HTTPUpstreamProfileControlPlane {
+		t.Fatalf("expected profile %q, got %q", HTTPUpstreamProfileControlPlane, profile)
+	}
+}
+
 func TestWithHTTPUpstreamRedirectsDisabled(t *testing.T) {
 	//nolint:staticcheck // Exercises the defensive nil-context fallback.
 	ctx := WithHTTPUpstreamRedirectsDisabled(nil)
