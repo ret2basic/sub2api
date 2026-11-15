@@ -160,6 +160,7 @@ func TestCNProviderQuotaService_KimiOfficialHosts(t *testing.T) {
 				require.Equal(t, http.MethodGet, upstream.request.Method)
 				require.Equal(t, "https://"+host+"/coding/v1/usages", upstream.request.URL.String())
 				require.Equal(t, "Bearer test-only-placeholder", upstream.request.Header.Get("Authorization"))
+				require.Equal(t, HTTPUpstreamProfileControlPlane, HTTPUpstreamProfileFromContext(upstream.request.Context()))
 			})
 		}
 	}

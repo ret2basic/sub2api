@@ -653,6 +653,21 @@ func (s *HTTPUpstreamSuite) TestLongStreamProfileUsesSharedHTTP2KeepAlive() {
 	require.Equal(s.T(), upstreamProtocolModeLongStreamH2, entry.protocolMode)
 }
 
+func (s *HTTPUpstreamSuite) TestControlPlaneProfileUsesDedicatedTransportPool() {
+	s.cfg.Gateway = config.GatewayConfig{ConnectionPoolIsolation: config.ConnectionPoolIsolationAccountProxy}
+	svc := s.newService()
+
+	dataEntry, err := svc.getClientEntry("", 17, 6, service.HTTPUpstreamProfileDefault, false, false)
+	require.NoError(s.T(), err)
+	controlEntry, err := svc.getClientEntry("", 17, 6, service.HTTPUpstreamProfileControlPlane, false, false)
+	require.NoError(s.T(), err)
+
+	require.NotSame(s.T(), dataEntry, controlEntry, "control-plane probes must not reuse the inference transport")
+	require.Equal(s.T(), upstreamProtocolModeDefault, dataEntry.protocolMode)
+	require.Equal(s.T(), upstreamProtocolModeControlPlane, controlEntry.protocolMode)
+	require.Len(s.T(), svc.clients, 2, "the same account and proxy should retain separate data/control pools")
+}
+
 func (s *HTTPUpstreamSuite) TestOpenAIProfileCustomHeaderTimeout() {
 	s.cfg.Gateway = config.GatewayConfig{
 		ResponseHeaderTimeout:       600,

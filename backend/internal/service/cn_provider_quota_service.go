@@ -189,6 +189,11 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	proxyURL := s.resolveProxyURL(ctx, account)
 	callCtx, cancel := context.WithTimeout(ctx, cnQuotaUpstreamTimeout)
 	defer cancel()
+	// Quota is control-plane traffic. Do not share the account-scoped
+	// Transport used by long-running inference streams: its connection cap is
+	// derived from account.Concurrency and can be fully occupied even while the
+	// official quota endpoint itself is healthy.
+	callCtx = WithHTTPUpstreamProfile(callCtx, HTTPUpstreamProfileControlPlane)
 	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_REQUEST_BUILD_FAILED", "build request: %v", err)
