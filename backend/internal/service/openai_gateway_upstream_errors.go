@@ -455,6 +455,19 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 		upstreamMsg,
 		retryableOnSameAccount || oauth429Retry,
 	)
+	// Zhipu 1305 with HTTP 529 means shared model overload. Trying other
+	// accounts immediately fans the request out to the same overloaded model.
+	if account != nil && account.Platform == PlatformZhipu && statusCode == 529 &&
+		gjson.GetBytes(responseBody, "error.code").String() == "1305" {
+		failoverErr.NextAccountAction = NextAccountStop
+		failoverErr.RetryableOnSameAccount = false
+		if failoverErr.ResponseHeaders == nil {
+			failoverErr.ResponseHeaders = make(http.Header)
+		}
+		if failoverErr.ResponseHeaders.Get("Retry-After") == "" {
+			failoverErr.ResponseHeaders.Set("Retry-After", "30")
+		}
+	}
 	if oauth429Retry {
 		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
 		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)
