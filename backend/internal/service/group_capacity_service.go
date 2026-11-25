@@ -174,6 +174,25 @@ func (s *GroupCapacityService) modelCapacity(accounts []Account) map[string]int 
 	return out
 }
 
+// usedByModelWithZeros 让每个有容量的分桶都出现在在途数里，没有在途请求时写 0。
+//
+// 2026-11-25：concurrency_used_by_model 按 omitempty 输出，只含有在途请求的桶。flash
+// 闲着时整个字段消失，客户端就当网关没有分桶，flash 准入退回 max 车道的推荐值
+// （dlt-saber 自 11-22 起一直记 no-flash-bucket）。空闲时最该放宽准入，偏偏看不到桶。
+func usedByModelWithZeros(used, maxByModel map[string]int) map[string]int {
+	if len(maxByModel) == 0 {
+		return used
+	}
+	out := make(map[string]int, len(maxByModel)+len(used))
+	for scope := range maxByModel {
+		out[scope] = 0
+	}
+	for scope, n := range used {
+		out[scope] += n
+	}
+	return out
+}
+
 // addModelUsage 把一个账号的分桶在途数累加进汇总。
 func addModelUsage(summary *GroupCapacitySummary, perScope map[string]int) {
 	for scope, n := range perScope {
@@ -442,7 +461,7 @@ func (s *GroupCapacityService) GetGroupCapacityByID(ctx context.Context, groupID
 		SessionsMax:            sessionsMax,
 		RPMUsed:                rpmUsed,
 		RPMMax:                 rpmMax,
-		ConcurrencyUsedByModel: byModel.ConcurrencyUsedByModel,
+		ConcurrencyUsedByModel: usedByModelWithZeros(byModel.ConcurrencyUsedByModel, maxByModel),
 		ConcurrencyMaxByModel:  maxByModel,
 	}, nil
 }

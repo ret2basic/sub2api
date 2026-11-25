@@ -108,3 +108,18 @@ func TestGroupCapacityByIDGivesNoGLMCapacityToOtherPlatforms(t *testing.T) {
 	require.Nil(t, summary.ConcurrencyMaxByModel, "Grok 池不该出现 glm 的分桶容量")
 	require.Nil(t, summary.ConcurrencyUsedByModel)
 }
+
+// 2026-11-25：池子空闲（分桶里一个在途请求都没有）时，每个有容量的桶也要带出在途 0。
+// 旧实现此时整个字段省略，客户端误判「网关没有分桶」，flash 准入退回 max 车道的推荐值。
+func TestGroupCapacityByIDReportsIdleModelBucketsAsZero(t *testing.T) {
+	cache := newScopedCapacityCache()
+	cache.scoped = nil
+	repo := &scopedCapacityAccountRepoStub{accounts: []Account{{ID: 1, Concurrency: 6, Platform: PlatformZhipu}, {ID: 2, Concurrency: 6, Platform: PlatformZhipu}}}
+	svc := NewGroupCapacityService(repo, nil, NewConcurrencyService(cache), nil, nil)
+	svc.SetModelConcurrency(map[string]int{"glm-5.3": 6, "glm-5.3-flash": 50})
+
+	summary, err := svc.GetGroupCapacityByID(context.Background(), 9)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"glm-5.3": 0, "glm-5.3-flash": 0}, summary.ConcurrencyUsedByModel)
+	require.Equal(t, map[string]int{"glm-5.3": 12, "glm-5.3-flash": 100}, summary.ConcurrencyMaxByModel)
+}
