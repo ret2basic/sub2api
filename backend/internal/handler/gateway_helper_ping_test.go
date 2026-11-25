@@ -23,7 +23,7 @@ func TestConcurrencyWaitPingInterval(t *testing.T) {
 					c, _ := gin.CreateTestContext(recorder)
 					c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
 					started := false
-					_, err := helper.waitForSlotWithPingTimeout(c, slotType, 1, 1, 150*time.Millisecond, true, &started, false)
+					_, err := helper.waitForSlotWithPingTimeout(c, slotType, 1, "", 1, 150*time.Millisecond, true, &started, false)
 					var concurrencyErr *ConcurrencyError
 					require.ErrorAs(t, err, &concurrencyErr)
 					require.True(t, concurrencyErr.IsTimeout)
@@ -55,7 +55,7 @@ func TestConcurrencyWaitWithoutPingAcquiresSlot(t *testing.T) {
 			c, _ := gin.CreateTestContext(recorder)
 			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
 			started := false
-			release, err := helper.waitForSlotWithPingTimeout(c, slotType, 1, 1, time.Second, true, &started, false)
+			release, err := helper.waitForSlotWithPingTimeout(c, slotType, 1, "", 1, time.Second, true, &started, false)
 			require.NoError(t, err)
 			require.NotNil(t, release)
 			release()
