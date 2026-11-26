@@ -96,6 +96,36 @@ func TestIsGrokContentPolicyRejection(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "permission-denied chat refusal is request scoped",
+			status: http.StatusForbidden,
+			body:   `{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`,
+			want:   true,
+		},
+		{
+			name:   "chat refusal with typographic apostrophes",
+			status: http.StatusForbidden,
+			body:   `{"code":"permission-denied","error":"I’m sorry, I can’t help with that request."}`,
+			want:   true,
+		},
+		{
+			name:   "chat refusal with JSON-escaped apostrophes",
+			status: http.StatusForbidden,
+			body:   `{"code":"permission-denied","error":"I’m sorry, I can’t help with that request."}`,
+			want:   true,
+		},
+		{
+			name:   "chat refusal outside 403 is not a content rejection",
+			status: http.StatusBadRequest,
+			body:   `{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`,
+			want:   false,
+		},
+		{
+			name:   "structured account code overrides chat refusal phrase",
+			status: http.StatusForbidden,
+			body:   `{"error":{"code":"account_suspended","message":"I'm sorry, I can't help with that request."}}`,
+			want:   false,
+		},
+		{
 			name:   "structured account code overrides usage guidelines phrase",
 			status: http.StatusForbidden,
 			body:   `{"error":{"code":"account_suspended","message":"Content violates usage guidelines."}}`,
@@ -138,6 +168,41 @@ func TestGrokContentPolicy403DoesNotMutateOrFailover(t *testing.T) {
 	got := svc.failoverOpenAIUpstreamHTTPError(context.Background(), c, account, resp, body, "text is sensitive", "grok-4.5")
 	require.Nil(t, got)
 	require.Zero(t, repo.tempUnschedCalls)
+}
+
+// The 2026-10-26..11-25 refusals cooled both pool accounts for 30 minutes
+// each and reached clients as 502 "Upstream access forbidden". The refusal
+// must stay on its account and reach /v1/messages clients as a 403 that
+// carries xAI's own words, so tools can re-run that one task elsewhere.
+func TestGrokChatRefusal403StaysOnAccountAndReachesMessagesClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`)
+	repo := &grokQuotaAccountRepo{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := &Account{ID: 4725, Platform: PlatformGrok, Type: AccountTypeOAuth}
+
+	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusForbidden, nil, body)
+	require.False(t, svc.shouldFailoverGrokUpstreamError(http.StatusForbidden, body))
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(string(body))),
+	}
+	_, err := svc.handleCompatErrorResponse(resp, c, account, writeAnthropicError, "grok-4.7")
+	require.Error(t, err)
+	require.Equal(t, http.StatusForbidden, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "invalid_request_error")
+	require.Contains(t, recorder.Body.String(), "can't help with that request")
+	require.NotContains(t, recorder.Body.String(), "Upstream access forbidden")
+
+	require.Zero(t, repo.tempUnschedCalls)
+	require.Zero(t, repo.rateLimitedCalls)
+	require.Zero(t, repo.updateCalls)
 }
 
 func TestGrokNonFailoverDoesNotApplyGenericTempUnschedulablePolicy(t *testing.T) {

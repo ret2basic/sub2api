@@ -33,7 +33,17 @@ func isGrokContentPolicyRejection(statusCode int, responseBody []byte) bool {
 		}
 	}
 
-	return grokContentPolicyMessage(string(responseBody))
+	if grokContentPolicyMessage(string(responseBody)) {
+		return true
+	}
+	// The raw scan cannot see a refusal whose apostrophe arrives JSON-escaped
+	// (' or ’); the decoded error messages can.
+	for _, candidate := range grokStructuredErrorMessageCandidates(responseBody) {
+		if grokContentPolicyMessage(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func grokStructuredAccountAccessMarker(value any) bool {
@@ -145,10 +155,32 @@ func grokAccountAccessMessage(value string) bool {
 	return false
 }
 
+// grokApostropheNormalizer folds typographic apostrophes so "can’t" and
+// "can't" match the same refusal phrase.
+var grokApostropheNormalizer = strings.NewReplacer("’", "'", "‘", "'", "ʼ", "'")
+
 func grokContentPolicyMessage(value string) bool {
 	lower := strings.ToLower(strings.TrimSpace(value))
 	if lower == "" {
 		return false
+	}
+	lower = grokApostropheNormalizer.Replace(lower)
+
+	// xAI's chat refusal arrives as 403 {"code":"permission-denied","error":
+	// "I'm sorry, I can't help with that request."}: 61 times on grok-4.7 from
+	// 2026-10-26 to 11-25. It answers this prompt, not the account. Treated as
+	// an account 403 it failed over and cooled each account for 30 minutes, so
+	// one refused PoC prompt emptied the pool. No account or entitlement
+	// message uses these words.
+	for _, phrase := range []string{
+		"can't help with that request",
+		"cannot help with that request",
+		"can't assist with that request",
+		"cannot assist with that request",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
 	}
 
 	// xAI's media safety responses use these exact phrases. They are specific
