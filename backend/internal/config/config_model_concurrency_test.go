@@ -47,4 +47,46 @@ func TestLoadModelConcurrencyAbsent(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Empty(t, cfg.Gateway.Scheduling.ModelConcurrency)
+	require.Nil(t, cfg.Gateway.Scheduling.ModelConcurrencyCounted, "没写这个键时为 nil，沿用旧的计入规则")
+}
+
+// TestLoadModelConcurrencyCountedEmptyList 写了空列表时要和「没写」区分开：分桶一律不计入（2026-11-27）。
+func TestLoadModelConcurrencyCountedEmptyList(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+gateway:
+  scheduling:
+    model_concurrency:
+      glm-5.3-flash: 5
+    model_concurrency_counted: []
+`), 0o600))
+	t.Setenv("CONFIG_FILE", path)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"glm-5.3-flash": 5}, cfg.Gateway.Scheduling.ModelConcurrency)
+	require.NotNil(t, cfg.Gateway.Scheduling.ModelConcurrencyCounted)
+	require.Empty(t, *cfg.Gateway.Scheduling.ModelConcurrencyCounted)
+}
+
+// TestLoadModelConcurrencyCountedList 带点的模型名放在列表值里，同样按原文读出。
+func TestLoadModelConcurrencyCountedList(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+gateway:
+  scheduling:
+    model_concurrency:
+      glm-5.4: 6
+    model_concurrency_counted: [glm-5.4]
+`), 0o600))
+	t.Setenv("CONFIG_FILE", path)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Gateway.Scheduling.ModelConcurrencyCounted)
+	require.Equal(t, []string{"glm-5.4"}, *cfg.Gateway.Scheduling.ModelConcurrencyCounted)
 }

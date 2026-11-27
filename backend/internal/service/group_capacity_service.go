@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -57,6 +58,9 @@ type GroupCapacityService struct {
 	rpmCache           RPMCache
 	// modelConcurrency 是 gateway.scheduling.model_concurrency（模型 → 每号槽位上限）。
 	modelConcurrency map[string]int
+	// countedScopes 是 gateway.scheduling.model_concurrency_counted：非 nil 时只有列在
+	// 里面的分桶计入 ConcurrencyUsed；nil 沿用旧规则（见 countsTowardPoolUsed）。
+	countedScopes map[string]struct{}
 }
 
 // NewGroupCapacityService creates a new GroupCapacityService.
@@ -90,6 +94,7 @@ func ProvideGroupCapacityService(
 	s := NewGroupCapacityService(accountRepo, groupRepo, concurrencyService, sessionLimitCache, rpmCache)
 	if cfg != nil {
 		s.SetModelConcurrency(cfg.Gateway.Scheduling.ModelConcurrency)
+		s.SetCountedModelScopes(cfg.Gateway.Scheduling.ModelConcurrencyCounted)
 	}
 	return s
 }
@@ -108,13 +113,44 @@ func (s *GroupCapacityService) SetModelConcurrency(modelConcurrency map[string]i
 	s.modelConcurrency = copied
 }
 
+// SetCountedModelScopes 设置哪些分桶的在途数计入 ConcurrencyUsed。nil 沿用旧规则；
+// 空列表表示分桶一律不计入，ConcurrencyUsed 只剩账号级桶。
+func (s *GroupCapacityService) SetCountedModelScopes(models *[]string) {
+	if s == nil {
+		return
+	}
+	if models == nil {
+		s.countedScopes = nil
+		return
+	}
+	set := make(map[string]struct{}, len(*models))
+	for _, model := range *models {
+		if model = strings.TrimSpace(model); model != "" {
+			set[model] = struct{}{}
+		}
+	}
+	s.countedScopes = set
+}
+
+// countsTowardPoolUsed 判断一个分桶的在途数是否计入 ConcurrencyUsed。
+// 显式列表优先。旧规则「每号上限不超过账号并发」在 2026-11-27 Flash 降到每号 5 后失效：
+// Flash 会被当成 max 车道的同口径桶，各工具看到的 max 车道余量被 Flash 吃掉。
+func (s *GroupCapacityService) countsTowardPoolUsed(scope string, accountConcurrency int) bool {
+	if s.countedScopes != nil {
+		_, ok := s.countedScopes[scope]
+		return ok
+	}
+	limit := s.modelConcurrency[scope]
+	return limit > 0 && limit <= accountConcurrency
+}
+
 // scopedUsage 汇总按模型分桶的在途槽位。
 //
 // 分桶槽位落在 concurrency:account:{id}:m:{scope}，账号级批量读取看不到，2026-11-02
 // 发现 GLM 池的 concurrency_used 因此恒为 0，三个 saber 工具算余量时看不到全机负载。
-// 只有每号上限不超过账号并发的桶（如 glm-5.3=6，账号并发 6）和 concurrency_max 同口径，
-// 计入 counted；上限更大的桶（如 glm-5.3-flash=50）只进 byModel。否则 used 会远超 max，
-// 让工具误以为池满而停派。
+// 只有和 concurrency_max 同口径的桶计入 counted，其余只进 byModel，否则 used 会远超 max，
+// 让工具误以为池满而停派。哪些桶同口径由 countsTowardPoolUsed 判断：配置了
+// model_concurrency_counted 就按列表，否则按旧规则（每号上限不超过账号并发，如 glm-5.3=6）。
 func (s *GroupCapacityService) scopedUsage(ctx context.Context, accountIDs []int64, accountConcurrency map[int64]int) (map[int64]int, map[int64]map[string]int) {
 	counted := map[int64]int{}
 	perAccount := map[int64]map[string]int{}
@@ -136,7 +172,7 @@ func (s *GroupCapacityService) scopedUsage(ctx context.Context, accountIDs []int
 				perAccount[accountID] = map[string]int{}
 			}
 			perAccount[accountID][scope] += n
-			if limit := s.modelConcurrency[scope]; limit > 0 && limit <= accountConcurrency[accountID] {
+			if s.countsTowardPoolUsed(scope, accountConcurrency[accountID]) {
 				counted[accountID] += n
 			}
 		}

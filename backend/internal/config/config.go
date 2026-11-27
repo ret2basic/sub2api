@@ -1596,6 +1596,14 @@ type GatewaySchedulingConfig struct {
 	// 模型名里的点会被拆键，且结果随 Go map 迭代序在成败间抖动（见该函数注释）。
 	ModelConcurrency map[string]int `mapstructure:"-" yaml:"-" json:"-"`
 
+	// ModelConcurrencyCounted 列出哪些分桶的在途数计入 pool-capacity 的 concurrency_used。
+	// 各 saber 工具用 recommended_max_concurrency 减 concurrency_used 算 max 车道余量，
+	// 所以这里只该放 max 车道模型的分桶。nil（配置里没写这个键）沿用旧规则：每号上限
+	// 不超过账号并发的分桶都计入。2026-11-27 Flash 每号上限降到 5，按旧规则 Flash 的在途
+	// 会被算进 max 车道（glm-5.4 不在分桶里，走账号级桶），所以配置写成空列表 []。
+	// 与 ModelConcurrency 一样由 applyModelConcurrencyFromRawConfig 读原文。
+	ModelConcurrencyCounted *[]string `mapstructure:"-" yaml:"-" json:"-"`
+
 	// PreferSoonestReset 开启后，负载感知选择会优先选用「会话窗口最早重置」的账号
 	// （use-it-or-lose-it：先用尽即将重置的账号，保留重置时间还很久的账号）。
 	// 默认 false，保持原有「优先级 → 负载率 → LRU」行为不变。
@@ -2130,7 +2138,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 }
 
 // applyModelConcurrencyFromRawConfig 从配置文件原文读取
-// gateway.scheduling.model_concurrency，不走 viper 解码。
+// gateway.scheduling.model_concurrency 和 model_concurrency_counted，不走 viper 解码。
 //
 // 回归背景（2026-09-18）：该键的模型名带点（glm-5.3 / glm-5.3-flash）。viper 的
 // AllSettings 以 "." 为层级分隔符把扁平键重建为嵌套 map，"glm-5.3" 被拆成
@@ -2151,7 +2159,8 @@ func applyModelConcurrencyFromRawConfig(cfg *Config) error {
 	var raw struct {
 		Gateway struct {
 			Scheduling struct {
-				ModelConcurrency map[string]int `yaml:"model_concurrency"`
+				ModelConcurrency        map[string]int `yaml:"model_concurrency"`
+				ModelConcurrencyCounted *[]string      `yaml:"model_concurrency_counted"`
 			} `yaml:"scheduling"`
 		} `yaml:"gateway"`
 	}
@@ -2159,6 +2168,7 @@ func applyModelConcurrencyFromRawConfig(cfg *Config) error {
 		return err
 	}
 	cfg.Gateway.Scheduling.ModelConcurrency = raw.Gateway.Scheduling.ModelConcurrency
+	cfg.Gateway.Scheduling.ModelConcurrencyCounted = raw.Gateway.Scheduling.ModelConcurrencyCounted
 	return nil
 }
 
