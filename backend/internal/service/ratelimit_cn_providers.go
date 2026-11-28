@@ -103,10 +103,19 @@ func zhipuTransientRateLimitCooldown(responseBody []byte) time.Duration {
 	if jsonErrorCodeIs(responseBody, "1113") {
 		return 10 * time.Minute
 	}
-	if jsonErrorCodeIs(responseBody, "1302") {
-		return 2 * time.Minute
-	}
+	// 1302 不在这里停调：见 zhipuRateLimitBackoff（2026-11-28）。
 	return 0
+}
+
+// zhipuRateLimitBackoff 判断智谱 1302（这个号请求频率超限）要不要只让客户端退避、不动账号状态。
+// 2026-11-28 智谱风控后改：原先停调 2 分钟，停调期间这个号上的会话会被挪到别的号，
+// 同一个会话的请求出现在多个号上，正是智谱判定共享、聚合转发的特征。现在号照常可调度，
+// 网关回 429 加 Retry-After，客户端过一会儿回到同一个号；快照显示窗口用量已接近耗尽时
+// 不走这里，仍按窗口冷却（1302 有时是额度用尽的另一种说法）。
+func zhipuRateLimitBackoff(account *Account, responseBody []byte) bool {
+	return account != nil && account.Platform == PlatformZhipu &&
+		jsonErrorCodeIs(responseBody, "1302") &&
+		!cnProviderQuotaSnapshotNearExhausted(account, cnFrequencyLimitQuotaGuardPercent)
 }
 
 // zhipuModelEntitlementError 识别智谱「模型不在订阅套餐内」错误（错误码 1311，
@@ -506,7 +515,16 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	if !account.IsCNProvider() {
 		return false
 	}
-	// 0) 智谱瞬时限流（1113 并发超上限 / 1302 请求频率超上限）：分钟级临时停调，
+	// 0) 智谱 1302（请求频率超上限）且额度有余：不停调，只让客户端退避（见 zhipuRateLimitBackoff）。
+	if zhipuRateLimitBackoff(account, responseBody) {
+		slog.Info("zhipu_rate_limit_backoff",
+			"account_id", account.ID,
+			"handling", "no_cooldown_client_retry_after",
+			"upstream_msg", extractUpstreamErrorMessage(responseBody),
+		)
+		return true
+	}
+	// 0.1) 智谱瞬时限流（1113 并发超上限）：分钟级临时停调，
 	// 绝不套用配额窗口重置点（此类错误与 5h/weekly 窗口无关）。
 	if account.Platform == PlatformZhipu {
 		if cooldown := zhipuTransientRateLimitCooldown(responseBody); cooldown > 0 {

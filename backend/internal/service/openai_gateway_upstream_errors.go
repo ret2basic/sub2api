@@ -472,6 +472,22 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 			failoverErr.ResponseHeaders.Set("Retry-After", "30")
 		}
 	}
+	// Zhipu 1302 means this account exceeded its request-rate limit. Re-sending the
+	// same request to another account right away routes around Zhipu's per-account
+	// limit, and one request showing up on two accounts is exactly the pooling
+	// pattern Zhipu flags (2026-11-28 risk notices). Stop here and let the client
+	// back off and come back to the same account.
+	if account != nil && account.Platform == PlatformZhipu && statusCode == http.StatusTooManyRequests &&
+		jsonErrorCodeIs(responseBody, "1302") {
+		failoverErr.NextAccountAction = NextAccountStop
+		failoverErr.RetryableOnSameAccount = false
+		if failoverErr.ResponseHeaders == nil {
+			failoverErr.ResponseHeaders = make(http.Header)
+		}
+		if failoverErr.ResponseHeaders.Get("Retry-After") == "" {
+			failoverErr.ResponseHeaders.Set("Retry-After", "30")
+		}
+	}
 	if oauth429Retry {
 		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
 		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)

@@ -45,20 +45,19 @@ func runZhipu429(service *RateLimitService, account *Account, body string) bool 
 	)
 }
 
-// 额度充裕 + 限频文案 → 走秒级 429 兜底，而不是冷却到 5h 窗口结束。
-func TestHandleUpstreamError_ZhipuFrequency429UsesShortCooldown(t *testing.T) {
+// 额度充裕 + 1302 限频 → 不动账号状态（2026-11-28 智谱风控后）：账号照常可调度，
+// 这个号上的会话退避后回到同一个号，不会因为停调被挪到别的号。
+func TestHandleUpstreamError_ZhipuFrequency429BacksOffWithoutCooldown(t *testing.T) {
 	repo := &rateLimitAccountRepoStub{}
 	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	account := newZhipuCodingPlanAccount(12, 4, 4*time.Hour)
 
-	runZhipu429(service, account, zhipuFrequencyLimitedBody)
+	shouldDisable := runZhipu429(service, account, zhipuFrequencyLimitedBody)
 
+	require.False(t, shouldDisable, "1302 must not disable the account")
 	require.Equal(t, 0, repo.setErrorCalls, "a frequency 429 must never SetError")
-	require.Equal(t, 1, repo.rateLimitedCalls)
-	require.Equal(t, account.ID, repo.lastRateLimitedID)
-	require.WithinDuration(t, time.Now().Add(defaultRateLimit429CooldownSeconds*time.Second),
-		repo.lastRateLimitedAt, 30*time.Second,
-		"frequency 429 must cool down seconds, not to the 5h window reset")
+	require.Equal(t, 0, repo.rateLimitedCalls, "1302 must not rate-limit the account")
+	require.Equal(t, 0, repo.tempCalls, "1302 must not temp-unschedule the account")
 }
 
 // 快照显示窗口已耗尽时，即使文案是限频，也仍然冷却到窗口重置点（护栏）。

@@ -451,6 +451,8 @@ var ErrNoAvailableCompactAccounts = errors.New("no available accounts support /r
 
 // OpenAIGatewayService handles OpenAI API gateway operations
 type OpenAIGatewayService struct {
+	// sessionLimitCache 记录每个号同时服务的会话（智谱号 extra.max_sessions 用，见 openai_zhipu_session_cap.go）
+	sessionLimitCache     SessionLimitCache
 	accountRepo           AccountRepository
 	usageLogRepo          UsageLogRepository
 	usageBillingRepo      UsageBillingRepository

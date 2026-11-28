@@ -58,9 +58,10 @@ func TestZhipuTransientRateLimitCooldown(t *testing.T) {
 			want: 10 * time.Minute,
 		},
 		{
+			// 2026-11-28 起 1302 不再停调，改由 zhipuRateLimitBackoff 只让客户端退避。
 			name: "1302 frequency spaced code",
 			body: []byte(`{"error":{"code": "1302","message":"请求频率超上限"}}`),
-			want: 2 * time.Minute,
+			want: 0,
 		},
 		{
 			name: "window exhausted 429 body",
